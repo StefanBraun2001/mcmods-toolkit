@@ -2,7 +2,7 @@
 
 **Feature:** `Minecraft_backup` — installed by `Install-PowerShellIntegration.ps1`.
 
-**Installer script version:** B_0.5 (2026-07-06) — **beta**. The command names and config file format may still change before a stable release.
+**Installer script version:** R_1.3 (2026-07-16).
 
 This is an optional PowerShell-only feature (there's no standalone `.py` script for it) that zips up — or plain-copies — the world folders inside a Minecraft `saves` directory into a destination folder of your choice, using 7-Zip. It supports any number of independent backup "jobs" (e.g. one per install/profile), each with its own saves folder, destination folder, and settings.
 

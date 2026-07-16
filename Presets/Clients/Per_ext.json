@@ -1,0 +1,7 @@
+{
+  "_comment": "Mods that provide performance improvements, plus some QoL improvments like advancements reloaded or borderless fullscreen, shader-ready, plus dependencies. Apply with: python Mcmods.py <profile> config Per_ext",
+  "mods": ["sodium", "sodium-extra", "lithium", "ferrite-core", "entityculling", "badoptimizations", "immediatelyfast", "krypton", "borderless-fullscreen", "advancements-reloaded", "cloth-config", "modmenu", "placeholder-api", "fabric-api", "iris"],
+  "resourcepacks": [],
+  "shaderpacks": [],
+  "datapacks": []
+}

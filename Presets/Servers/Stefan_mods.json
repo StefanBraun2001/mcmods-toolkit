@@ -1,0 +1,5 @@
+{
+  "_comment": "Stefan's choice for a server, mostly QoL plus some additional information like apple skin or mobcaps (carpet). Apply with: python Mcmods_server.py <profile> config Stefan_mods",
+  "mods": ["fabric-api", "lithium", "ferrite-core", "krypton", "servux", "carpet", "appleskin"],
+  "datapacks": []
+}

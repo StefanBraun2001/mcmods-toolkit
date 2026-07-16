@@ -2,7 +2,3 @@
 Mcmods_*.json
 PowerShell_Automation.json
 Backup_Automation.json
-
-# Separate projects, not part of this toolkit's release
-Datapacks/
-Mods/

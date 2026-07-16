@@ -3,7 +3,7 @@
 """
 Mcmods.py - Minecraft mod/resourcepack/shaderpack manager (Modrinth + manual)
 
-Version: R_1.2 (2026-07-13)
+Version: R_1.3 (2026-07-16)
 
 Single script for every game profile (Main, Side, a test install, ...). The
 profile is now the first CLI argument instead of being baked into the
@@ -39,13 +39,19 @@ Features:
     files) and a "Datapacks" subfolder (datapack depot copies). Older loose
     files sitting directly in the depot root are swept into Shelf
     automatically the next time the script runs.
+  - config: batch-add every mod/resourcepack/shaderpack/datapack slug listed
+    in a preset file (Presets/Clients/<preset>.json next to this script,
+    matched case-insensitively), then offers to add extra mods by hand and
+    to run 'upgrade' immediately. add/add_rp/add_sp/add_dp all accept
+    multiple space-separated slugs in one call, too.
 
 Usage:
   python Mcmods.py <profile> init
   python Mcmods.py <profile> upgrade [slug]        # omit slug to upgrade everything
   python Mcmods.py <profile> set-version <version>
+  python Mcmods.py <profile> config <preset>        # batch-add every slug from a preset file
 
-  python Mcmods.py <profile> add <slug>             # mods
+  python Mcmods.py <profile> add <slug> [slug2 ...]  # mods
   python Mcmods.py <profile> remove <slug>
   python Mcmods.py <profile> add-manual <filename>
   python Mcmods.py <profile> remove-manual <filename>
@@ -53,19 +59,19 @@ Usage:
   python Mcmods.py <profile> legacy_off <slug>
   python Mcmods.py <profile> link <slug> <filename>
 
-  python Mcmods.py <profile> add_rp <slug>          # resource packs
+  python Mcmods.py <profile> add_rp <slug> [slug2 ...]  # resource packs
   python Mcmods.py <profile> remove_rp <slug>
   python Mcmods.py <profile> add_manual_rp <filename>
   python Mcmods.py <profile> remove_manual_rp <filename>
   python Mcmods.py <profile> link_rp <slug> <filename>
 
-  python Mcmods.py <profile> add_sp <slug>          # shader packs
+  python Mcmods.py <profile> add_sp <slug> [slug2 ...]  # shader packs
   python Mcmods.py <profile> remove_sp <slug>
   python Mcmods.py <profile> add_manual_sp <filename>
   python Mcmods.py <profile> remove_manual_sp <filename>
   python Mcmods.py <profile> link_sp <slug> <filename>
 
-  python Mcmods.py <profile> add_dp <slug>          # datapacks (kept in depot/Datapacks)
+  python Mcmods.py <profile> add_dp <slug> [slug2 ...]  # datapacks (kept in depot/Datapacks)
   python Mcmods.py <profile> remove_dp <slug>
   python Mcmods.py <profile> add_manual_dp <filename>
   python Mcmods.py <profile> remove_manual_dp <filename>
@@ -109,8 +115,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.2"
-SCRIPT_VERSION_DATE = "2026-07-13"
+SCRIPT_VERSION      = "R_1.3"
+SCRIPT_VERSION_DATE = "2026-07-16"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE = None  # set in main() once the profile is known
@@ -902,19 +908,144 @@ def cmd_set_version(config, new_version):
 
 
 # ---------------------------------------------------------------------------
+# Presets (point 5): batch-add every slug listed in a Presets/Clients/<name>.json
+# file. Only registers entries — same as running 'add'/'add_rp'/'add_sp'/'add_dp'
+# once per slug — so 'upgrade' still has to be run afterwards to download them.
+# ---------------------------------------------------------------------------
+
+def get_presets_dir():
+    return SCRIPT_DIR / "Presets" / "Clients"
+
+
+def _available_presets():
+    presets_dir = get_presets_dir()
+    if not presets_dir.exists():
+        return []
+    return sorted(p.stem for p in presets_dir.glob("*.json"))
+
+
+def _find_preset_file(name):
+    presets_dir = get_presets_dir()
+    if not presets_dir.exists():
+        return None
+    target = name.lower()
+    for p in presets_dir.glob("*.json"):
+        if p.stem.lower() == target:
+            return p
+    return None
+
+
+def cmd_config(config, name):
+    preset_file = _find_preset_file(name)
+    if not preset_file:
+        print(f"No preset named '{name}' found in {get_presets_dir()}.")
+        available = _available_presets()
+        if available:
+            print(f"Available presets: {', '.join(available)}")
+        else:
+            print("No preset files exist there yet.")
+        return
+
+    try:
+        with open(preset_file, encoding="utf-8") as f:
+            preset = json.load(f)
+    except Exception as e:
+        print(f"Failed to read preset '{preset_file.name}': {e}")
+        return
+
+    print(f"Applying preset '{preset_file.stem}' ({preset_file.name})...\n")
+
+    categories = [
+        ("Mods",           "mods",          cmd_add),
+        ("Resource packs", "resourcepacks", cmd_add_rp),
+        ("Shader packs",   "shaderpacks",   cmd_add_sp),
+        ("Datapacks",      "datapacks",     cmd_add_dp),
+    ]
+
+    total_added   = []
+    total_skipped = []
+    for label, key, add_fn in categories:
+        slugs = preset.get(key, [])
+        if not slugs:
+            continue
+        print(f"-- {label} --")
+        added, skipped = add_fn(config, slugs, prompt_upgrade=False, announce=False)
+        total_added   += added
+        total_skipped += skipped
+        print()
+
+    print("Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)")
+    for label, key, add_fn in categories:
+        extra = input(f"  Extra {label.lower()}: ").strip()
+        if not extra:
+            continue
+        added, skipped = add_fn(config, extra.split(), prompt_upgrade=False, announce=False)
+        total_added   += added
+        total_skipped += skipped
+    print()
+
+    print("=== Preset summary ===")
+    _print_add_summary("entrie(s)", total_added, total_skipped)
+
+    if total_added:
+        _maybe_prompt_upgrade(config)
+
+
+# ---------------------------------------------------------------------------
 # Mod commands
 # ---------------------------------------------------------------------------
 
-def cmd_add(config, slug):
-    if any(m["slug"] == slug for m in config.get("mods", [])):
-        print(f"'{slug}' is already in the mod list.")
-        return
-    print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
-    name = get_project_name(slug)
-    print(f"  found: {name}")
-    config.setdefault("mods", []).append({"slug": slug, "name": name, "file": None, "pending": True})
-    save_config(config)
-    print(f"Added '{name}'. Run 'upgrade' to download it.")
+def _add_slugs(config, category_key, slugs, extra_fields=None):
+    """
+    Register each slug in `slugs` under config[category_key], skipping any
+    that are already present (within this call or already in the config).
+    Returns (added, skipped): added is a list of (slug, name) tuples,
+    skipped is a list of slugs that were already registered.
+    """
+    extra_fields = extra_fields or {}
+    existing = {e["slug"] for e in config.get(category_key, [])}
+    added   = []
+    skipped = []
+    for slug in slugs:
+        if slug in existing:
+            skipped.append(slug)
+            continue
+        print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
+        name = get_project_name(slug)
+        print(f"  found: {name}")
+        entry = {"slug": slug, "name": name, "file": None, "pending": True}
+        entry.update(extra_fields)
+        config.setdefault(category_key, []).append(entry)
+        existing.add(slug)
+        added.append((slug, name))
+    if added:
+        save_config(config)
+    return added, skipped
+
+
+def _print_add_summary(label, added, skipped):
+    if added:
+        print(f"\nAdded {len(added)} {label}: {', '.join(n for _, n in added)}.")
+        print("Run 'upgrade' to download them.")
+    if skipped:
+        print(f"Already registered, skipped {len(skipped)}: {', '.join(skipped)}.")
+    if not added and not skipped:
+        print("Nothing to add.")
+
+
+def _maybe_prompt_upgrade(config):
+    resp = input("Upgrade now? [Y/n]: ").strip().lower()
+    if resp in ("", "y", "yes"):
+        cmd_upgrade(config)
+
+
+def cmd_add(config, slugs, prompt_upgrade=True, announce=True):
+    added, skipped = _add_slugs(config, "mods", slugs)
+    if announce:
+        _print_add_summary("mod(s)", added, skipped)
+    if added and prompt_upgrade:
+        _maybe_prompt_upgrade(config)
+    return added, skipped
 
 
 def cmd_remove(config, slug):
@@ -1202,16 +1333,13 @@ def _upgrade_mod_with_choose(config, mod, versions, mods_dir, force_prompt=False
 # Resource pack commands
 # ---------------------------------------------------------------------------
 
-def cmd_add_rp(config, slug):
-    if any(p["slug"] == slug for p in config.get("resourcepacks", [])):
-        print(f"'{slug}' is already in the resource pack list.")
-        return
-    print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
-    name = get_project_name(slug)
-    print(f"  found: {name}")
-    config.setdefault("resourcepacks", []).append({"slug": slug, "name": name, "file": None, "pending": True, "outdated": False})
-    save_config(config)
-    print(f"Added resource pack '{name}'. Run 'upgrade' to download it.")
+def cmd_add_rp(config, slugs, prompt_upgrade=True, announce=True):
+    added, skipped = _add_slugs(config, "resourcepacks", slugs, extra_fields={"outdated": False})
+    if announce:
+        _print_add_summary("resource pack(s)", added, skipped)
+    if added and prompt_upgrade:
+        _maybe_prompt_upgrade(config)
+    return added, skipped
 
 
 def cmd_remove_rp(config, slug):
@@ -1254,16 +1382,13 @@ def cmd_remove_manual_rp(config, filename):
 # Shader pack commands
 # ---------------------------------------------------------------------------
 
-def cmd_add_sp(config, slug):
-    if any(p["slug"] == slug for p in config.get("shaderpacks", [])):
-        print(f"'{slug}' is already in the shader pack list.")
-        return
-    print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
-    name = get_project_name(slug)
-    print(f"  found: {name}")
-    config.setdefault("shaderpacks", []).append({"slug": slug, "name": name, "file": None, "pending": True, "outdated": False})
-    save_config(config)
-    print(f"Added shader pack '{name}'. Run 'upgrade' to download it.")
+def cmd_add_sp(config, slugs, prompt_upgrade=True, announce=True):
+    added, skipped = _add_slugs(config, "shaderpacks", slugs, extra_fields={"outdated": False})
+    if announce:
+        _print_add_summary("shader pack(s)", added, skipped)
+    if added and prompt_upgrade:
+        _maybe_prompt_upgrade(config)
+    return added, skipped
 
 
 def cmd_remove_sp(config, slug):
@@ -1317,18 +1442,16 @@ def cmd_remove_manual_sp(config, filename):
 # easy to notice.
 # ---------------------------------------------------------------------------
 
-def cmd_add_dp(config, slug):
-    if any(p["slug"] == slug for p in config.get("datapacks", [])):
-        print(f"'{slug}' is already in the datapack list.")
-        return
-    print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
-    name = get_project_name(slug)
-    print(f"  found: {name}")
-    config.setdefault("datapacks", []).append({"slug": slug, "name": name, "file": None, "pending": True, "outdated": False})
-    save_config(config)
-    print(f"Added datapack '{name}'. Run 'upgrade' to download it into the depot.")
-    print("Datapacks are per-world — this only stages the file in the depot; copy it into")
-    print("your world's datapacks folder yourself.")
+def cmd_add_dp(config, slugs, prompt_upgrade=True, announce=True):
+    added, skipped = _add_slugs(config, "datapacks", slugs, extra_fields={"outdated": False})
+    if announce:
+        _print_add_summary("datapack(s)", added, skipped)
+        if added:
+            print("Datapacks are per-world — 'upgrade' only stages the file in the depot; copy")
+            print("it into your world's datapacks folder yourself.")
+    if added and prompt_upgrade:
+        _maybe_prompt_upgrade(config)
+    return added, skipped
 
 
 def cmd_remove_dp(config, slug):
@@ -1854,10 +1977,16 @@ Commands:
                                   With a slug, only that one mod/pack is checked/upgraded
                                   (still respects its FROZEN/UNLOADED/CHOOSE flags).
   set-version <version>           Change MC version and immediately run upgrade
+  config <preset>                 Batch-add every slug from Presets/Clients/<preset>.json
+                                  (matched case-insensitively). Then asks for any extra
+                                  mods/resourcepacks/shaderpacks/datapacks to add by hand,
+                                  and offers "Upgrade now? [Y/n]" (Enter = yes) once
+                                  everything's been registered.
   list                            Show all entries by category (incl. FROZEN status)
 
   --- Mods ---
-  add <slug>                      Add a mod by Modrinth slug
+  add <slug> [slug2 ...]          Add one or more mods by Modrinth slug. After adding,
+                                  you're asked "Upgrade now? [Y/n]" (Enter = yes).
   remove <slug>                   Remove a mod (also deletes the JAR)
   add-manual <filename>           Register a manual JAR (never touched by upgrade)
   remove-manual <filename>        Unregister a manual mod (file is NOT deleted)
@@ -1866,22 +1995,23 @@ Commands:
   link <slug> <filename>          Attach a manually downloaded file to a managed mod
 
   --- Resource packs ---
-  add_rp <slug>                   Add a resource pack by Modrinth slug
+  add_rp <slug> [slug2 ...]       Add one or more resource packs by Modrinth slug
   remove_rp <slug>                Remove a resource pack (also deletes the file)
   add_manual_rp <filename>        Register a manual resource pack
   remove_manual_rp <filename>     Unregister a manual resource pack (file NOT deleted)
   link_rp <slug> <filename>       Attach a manually downloaded file to a managed RP
 
   --- Shader packs ---
-  add_sp <slug>                   Add a shader pack by Modrinth slug
+  add_sp <slug> [slug2 ...]       Add one or more shader packs by Modrinth slug
   remove_sp <slug>                Remove a shader pack (file deleted, .txt config quarantined)
   add_manual_sp <filename>        Register a manual shader pack
   remove_manual_sp <filename>     Unregister a manual shader pack (file NOT deleted)
   link_sp <slug> <filename>       Attach a manually downloaded file to a managed SP
 
   --- Datapacks ---
-  add_dp <slug>                   Add a datapack by Modrinth slug (kept in depot/Datapacks —
-                                  datapacks are per-world, so there's no live folder for them)
+  add_dp <slug> [slug2 ...]       Add one or more datapacks by Modrinth slug (kept in
+                                  depot/Datapacks — datapacks are per-world, so there's
+                                  no live folder for them)
   remove_dp <slug>                Remove a datapack (also deletes its depot file)
   add_manual_dp <filename>        Register a manual datapack (never touched by upgrade)
   remove_manual_dp <filename>     Unregister a manual datapack (file is NOT deleted)
@@ -1920,6 +2050,20 @@ Commands:
   help                            Show this help text
 
 Notes:
+  - 'config <preset>' reads Presets/Clients/<preset>.json (next to this script) and
+    registers every slug listed under its "mods" / "resourcepacks" / "shaderpacks" /
+    "datapacks" keys — same as running 'add'/'add_rp'/'add_sp'/'add_dp' once per slug.
+    The preset name is matched case-insensitively against filenames in that folder.
+    It never re-registers an already-added slug. Afterwards it asks, once per
+    category, for any extra mods/resourcepacks/shaderpacks/datapacks to add by hand
+    (space-separated slugs, Enter to skip each), prints a summary of everything
+    added/skipped, and offers "Upgrade now? [Y/n]" (Enter = yes) to download it all
+    immediately. See Presets/Clients/README.md for the file format.
+  - 'add'/'add_rp'/'add_sp'/'add_dp' all accept multiple slugs in one call
+    (e.g. 'add sodium lithium fabric-api') — just separate them with spaces, the
+    same way you'd pass any other multiple command-line arguments. Each command
+    prints a summary of what was added/already-registered, then asks "Upgrade
+    now? [Y/n]" (Enter = yes) if anything new was added.
   - 'upgrade <slug>' upgrades just that one mod/resourcepack/shaderpack/datapack —
     everything else in the profile is left untouched. Plain 'upgrade' (no slug) does all.
   - Datapacks are per-world, not per-install, so they're never placed in a live game
@@ -1973,6 +2117,21 @@ def _available_profiles():
     return sorted(names)
 
 
+# Every recognized command — used to spot the common mistake of typing a
+# command as the first argument and forgetting the profile in front of it.
+_ALL_COMMANDS = {
+    "init", "upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version", "config", "list",
+    "add", "remove", "add-manual", "remove-manual", "legacy_on", "legacy_off", "choose", "unchoose",
+    "unchoose_all", "link",
+    "add_rp", "remove_rp", "add_manual_rp", "remove_manual_rp", "link_rp",
+    "add_sp", "remove_sp", "add_manual_sp", "remove_manual_sp", "link_sp",
+    "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "link_dp",
+    "freeze", "unfreeze", "unload", "load", "clear",
+    "shelf", "unshelf",
+    "help",
+}
+
+
 def main():
     global CONFIG_FILE
 
@@ -1985,7 +2144,12 @@ def main():
     profile = args[0]
 
     if len(args) < 2:
-        print(f"Usage: python Mcmods.py {profile} <command> [args...]")
+        if profile in _ALL_COMMANDS:
+            print(f"'{profile}' looks like a command, but the profile name has to come first.")
+            print(f"Usage: python Mcmods.py <profile> {profile} [args...]")
+            print(f"Example: python Mcmods.py main {profile}")
+        else:
+            print(f"Usage: python Mcmods.py {profile} <command> [args...]")
         print("Run 'python Mcmods.py help' for the full command list.")
         sys.exit(1)
 
@@ -2039,13 +2203,16 @@ def main():
             print(f"Usage: python Mcmods.py {profile} set-version <version>")
             sys.exit(1)
         cmd_set_version(config, rest[0])
+    elif cmd == "config":
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} config <preset>"); sys.exit(1)
+        cmd_config(config, rest[0])
     elif cmd == "list":
         cmd_list(config)
 
     # Mods
     elif cmd == "add":
-        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add <slug>"); sys.exit(1)
-        cmd_add(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add <slug> [slug2 ...]"); sys.exit(1)
+        cmd_add(config, rest)
     elif cmd == "remove":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} remove <slug>"); sys.exit(1)
         cmd_remove(config, rest[0])
@@ -2075,8 +2242,8 @@ def main():
 
     # Resource packs
     elif cmd == "add_rp":
-        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add_rp <slug>"); sys.exit(1)
-        cmd_add_rp(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add_rp <slug> [slug2 ...]"); sys.exit(1)
+        cmd_add_rp(config, rest)
     elif cmd == "remove_rp":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} remove_rp <slug>"); sys.exit(1)
         cmd_remove_rp(config, rest[0])
@@ -2092,8 +2259,8 @@ def main():
 
     # Shader packs
     elif cmd == "add_sp":
-        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add_sp <slug>"); sys.exit(1)
-        cmd_add_sp(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add_sp <slug> [slug2 ...]"); sys.exit(1)
+        cmd_add_sp(config, rest)
     elif cmd == "remove_sp":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} remove_sp <slug>"); sys.exit(1)
         cmd_remove_sp(config, rest[0])
@@ -2109,8 +2276,8 @@ def main():
 
     # Datapacks
     elif cmd == "add_dp":
-        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add_dp <slug>"); sys.exit(1)
-        cmd_add_dp(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} add_dp <slug> [slug2 ...]"); sys.exit(1)
+        cmd_add_dp(config, rest)
     elif cmd == "remove_dp":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} remove_dp <slug>"); sys.exit(1)
         cmd_remove_dp(config, rest[0])

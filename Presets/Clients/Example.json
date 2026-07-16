@@ -1,0 +1,7 @@
+{
+  "_comment": "Template preset — copy this file, rename it, and edit the slugs. Apply with: python Mcmods.py <profile> config example",
+  "mods": ["sodium", "lithium"],
+  "resourcepacks": [],
+  "shaderpacks": [],
+  "datapacks": []
+}

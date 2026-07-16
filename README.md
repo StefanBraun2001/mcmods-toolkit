@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.2 (2026-07-13)
+**Script:** `Mcmods.py` — **Version:** R_1.3 (2026-07-16)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
@@ -132,29 +132,79 @@ The script uses **Modrinth slugs** to identify mods and packs. The slug is the l
 ### Mods
 ```
 python Mcmods.py <profile> add <slug>           # Add a mod
+python Mcmods.py <profile> add <slug1> <slug2> <slug3>   # Add several at once
 python Mcmods.py <profile> remove <slug>        # Remove a mod (also deletes the file)
 ```
 
 ### Resource Packs
 ```
-python Mcmods.py <profile> add_rp <slug>
+python Mcmods.py <profile> add_rp <slug> [slug2 ...]
 python Mcmods.py <profile> remove_rp <slug>
 ```
 
 ### Shader Packs
 ```
-python Mcmods.py <profile> add_sp <slug>
+python Mcmods.py <profile> add_sp <slug> [slug2 ...]
 python Mcmods.py <profile> remove_sp <slug>
 ```
 
 ### Datapacks
 ```
-python Mcmods.py <profile> add_dp <slug>
+python Mcmods.py <profile> add_dp <slug> [slug2 ...]
 python Mcmods.py <profile> remove_dp <slug>
 ```
 See [Datapacks](#datapacks) below for why these behave a bit differently from the other three categories.
 
-After adding anything, run `upgrade` to actually download it.
+`add` / `add_rp` / `add_sp` / `add_dp` all accept **more than one slug** — just list them separated by spaces, the normal way command-line arguments work (Modrinth slugs never contain spaces themselves, so there's no ambiguity). Each command prints a summary of what was added vs. already registered, then asks:
+
+```
+Upgrade now? [Y/n]:
+```
+
+Press Enter (or `y`) to download everything you just added right away, or `n` to just register it and run `upgrade` yourself later.
+
+---
+
+## Batch-Adding via Presets
+
+If you regularly set up the same bundle of mods/packs on new profiles (e.g. a "performance" bundle or a full modpack list), you can save that bundle as a **preset** and apply it in one command instead of running `add` over and over:
+
+```
+python Mcmods.py <profile> config Performance_full
+```
+
+This looks for `Performance_full.json` in the `Presets\Clients` folder next to the script — the match is **case-insensitive**, so `config performance_full` finds the same file. Every slug listed in it gets registered (same as running `add` / `add_rp` / `add_sp` / `add_dp` once per entry); nothing already registered is touched twice, and nothing is downloaded yet.
+
+Once the preset's entries are registered, `config` asks once per category:
+
+```
+Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)
+  Extra mods:
+  Extra resource packs:
+  Extra shader packs:
+  Extra datapacks:
+```
+
+so you can top up the bundle — with any of the four types, not just mods — without separate `add`/`add_rp`/`add_sp`/`add_dp` calls. Press Enter on any line to skip that category. It then prints a summary of everything added/skipped and asks:
+
+```
+Upgrade now? [Y/n]:
+```
+
+Press Enter (or `y`) to download everything right away, or `n` to run `upgrade` yourself whenever you're ready.
+
+A preset file looks like this:
+
+```json
+{
+  "mods":          ["sodium", "lithium"],
+  "resourcepacks": ["faithful-64x"],
+  "shaderpacks":   ["complementary-reimagined"],
+  "datapacks":     ["terralith"]
+}
+```
+
+Any category can be omitted or left empty. See `Presets\Clients\README.md` (and the included `Example.json`) for the full format and how to create your own.
 
 ---
 

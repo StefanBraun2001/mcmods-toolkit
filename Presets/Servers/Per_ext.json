@@ -1,0 +1,5 @@
+{
+  "_comment": "Good default for a server for better performance using Fabric. Apply with: python Mcmods_server.py <profile> config Per_ext",
+  "mods": ["fabric-api", "lithium", "ferrite-core", "krypton"],
+  "datapacks": []
+}

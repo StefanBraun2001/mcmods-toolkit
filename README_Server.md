@@ -1,6 +1,6 @@
 # Minecraft Server Mod Manager — README
 
-**Script:** `Mcmods_server.py` — **Version:** R_1.2 (2026-07-10)
+**Script:** `Mcmods_server.py` — **Version:** R_1.3 (2026-07-16)
 
 This is the **server** variant of the mod manager: it downloads the mods and datapacks you want to run on a Minecraft server from [Modrinth](https://modrinth.com) into a download folder of your choosing, ready to be copied onto the server (or symlinked into it). Unlike the game-profile manager (`Mcmods.py`, see [README.md](README.md)), it has no concept of resource packs or shader packs, and it doesn't touch your actual server installation directly — it's an intermediate staging folder that you move into place yourself.
 
@@ -96,17 +96,64 @@ The script uses **Modrinth slugs** to identify mods and datapacks. The slug is t
 
 ### Mods
 ```
-python Mcmods_server.py <profile> add <slug>
+python Mcmods_server.py <profile> add <slug> [slug2 ...]
 python Mcmods_server.py <profile> remove <slug>
 ```
 
 ### Datapacks
 ```
-python Mcmods_server.py <profile> add_dp <slug>
+python Mcmods_server.py <profile> add_dp <slug> [slug2 ...]
 python Mcmods_server.py <profile> remove_dp <slug>
 ```
 
-Datapacks are looked up on Modrinth using the `datapack` loader, independent of your mod loader. After adding anything, run `upgrade` to actually download it.
+Datapacks are looked up on Modrinth using the `datapack` loader, independent of your mod loader.
+
+`add` / `add_dp` both accept **more than one slug** — just list them separated by spaces, the normal way command-line arguments work. Each command prints a summary of what was added vs. already registered, then asks:
+
+```
+Upgrade now? [Y/n]:
+```
+
+Press Enter (or `y`) to download everything you just added right away, or `n` to just register it and run `upgrade` yourself later.
+
+---
+
+## Batch-Adding via Presets
+
+If you regularly set up the same bundle of mods/datapacks on new server profiles, save that bundle as a **preset** and apply it in one command instead of running `add` over and over:
+
+```
+python Mcmods_server.py <profile> config Performance_full
+```
+
+This looks for `Performance_full.json` in the `Presets\Servers` folder next to the script — the match is **case-insensitive**, so `config performance_full` finds the same file. Every slug listed in it gets registered (same as running `add` / `add_dp` once per entry); nothing already registered is touched twice, and nothing is downloaded yet.
+
+Once the preset's entries are registered, `config` asks once per category:
+
+```
+Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)
+  Extra mods:
+  Extra datapacks:
+```
+
+so you can top up the bundle — mods or datapacks — without separate `add`/`add_dp` calls. Press Enter on either line to skip that category. It then prints a summary of everything added/skipped and asks:
+
+```
+Upgrade now? [Y/n]:
+```
+
+Press Enter (or `y`) to download everything right away, or `n` to run `upgrade` yourself whenever you're ready.
+
+A preset file looks like this:
+
+```json
+{
+  "mods":      ["lithium"],
+  "datapacks": ["terralith"]
+}
+```
+
+Either category can be omitted or left empty (no `resourcepacks` / `shaderpacks` here — the server variant doesn't support those). See `Presets\Servers\README.md` (and the included `Example.json`) for the full format and how to create your own.
 
 ---
 

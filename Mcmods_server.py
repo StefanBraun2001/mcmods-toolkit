@@ -3,7 +3,7 @@
 """
 Mcmods_server.py - Minecraft server mod/datapack manager (Modrinth)
 
-Version: R_1.2 (2026-07-10)
+Version: R_1.3 (2026-07-16)
 
 Multi-profile server variant of Mcmods_templatev2.py (each profile is one
 server's mod/datapack set). The profile is the first CLI argument, e.g.
@@ -18,8 +18,9 @@ Usage:
   python Mcmods_server.py <profile> init
   python Mcmods_server.py <profile> upgrade [slug]  # omit slug to upgrade everything
   python Mcmods_server.py <profile> set-version <version>
+  python Mcmods_server.py <profile> config <preset>  # batch-add every slug from a preset file
 
-  python Mcmods_server.py <profile> add <slug>             # mods
+  python Mcmods_server.py <profile> add <slug> [slug2 ...]  # mods
   python Mcmods_server.py <profile> remove <slug>
   python Mcmods_server.py <profile> add-manual <filename>
   python Mcmods_server.py <profile> remove-manual <filename>
@@ -27,7 +28,7 @@ Usage:
   python Mcmods_server.py <profile> legacy_off <slug>
   python Mcmods_server.py <profile> link <slug> <filename>
 
-  python Mcmods_server.py <profile> add_dp <slug>          # datapacks
+  python Mcmods_server.py <profile> add_dp <slug> [slug2 ...]  # datapacks
   python Mcmods_server.py <profile> remove_dp <slug>
   python Mcmods_server.py <profile> add_manual_dp <filename>
   python Mcmods_server.py <profile> remove_manual_dp <filename>
@@ -70,8 +71,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.2"
-SCRIPT_VERSION_DATE = "2026-07-10"
+SCRIPT_VERSION      = "R_1.3"
+SCRIPT_VERSION_DATE = "2026-07-16"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE    = None  # set in main() once the profile is known
@@ -573,6 +574,88 @@ def cmd_set_version(config, new_version):
 
 
 # ---------------------------------------------------------------------------
+# Presets: batch-add every slug listed in a Presets/Servers/<name>.json file.
+# Only registers entries — same as running 'add'/'add_dp' once per slug — so
+# 'upgrade' still has to be run afterwards to download them.
+# ---------------------------------------------------------------------------
+
+def get_presets_dir():
+    return SCRIPT_DIR / "Presets" / "Servers"
+
+
+def _available_presets():
+    presets_dir = get_presets_dir()
+    if not presets_dir.exists():
+        return []
+    return sorted(p.stem for p in presets_dir.glob("*.json"))
+
+
+def _find_preset_file(name):
+    presets_dir = get_presets_dir()
+    if not presets_dir.exists():
+        return None
+    target = name.lower()
+    for p in presets_dir.glob("*.json"):
+        if p.stem.lower() == target:
+            return p
+    return None
+
+
+def cmd_config(config, name):
+    preset_file = _find_preset_file(name)
+    if not preset_file:
+        print(f"No preset named '{name}' found in {get_presets_dir()}.")
+        available = _available_presets()
+        if available:
+            print(f"Available presets: {', '.join(available)}")
+        else:
+            print("No preset files exist there yet.")
+        return
+
+    try:
+        with open(preset_file, encoding="utf-8") as f:
+            preset = json.load(f)
+    except Exception as e:
+        print(f"Failed to read preset '{preset_file.name}': {e}")
+        return
+
+    print(f"Applying preset '{preset_file.stem}' ({preset_file.name})...\n")
+
+    categories = [
+        ("Mods",      "mods",      cmd_add),
+        ("Datapacks", "datapacks", cmd_add_dp),
+    ]
+
+    total_added   = []
+    total_skipped = []
+    for label, key, add_fn in categories:
+        slugs = preset.get(key, [])
+        if not slugs:
+            continue
+        print(f"-- {label} --")
+        added, skipped = add_fn(config, slugs, prompt_upgrade=False, announce=False)
+        total_added   += added
+        total_skipped += skipped
+        print()
+
+    print("Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)")
+    for label, key, add_fn in categories:
+        extra = input(f"  Extra {label.lower()}: ").strip()
+        if not extra:
+            continue
+        added, skipped = add_fn(config, extra.split(), prompt_upgrade=False, announce=False)
+        total_added   += added
+        total_skipped += skipped
+    print()
+
+    print("=== Preset summary ===")
+    _print_add_summary("entrie(s)", total_added, total_skipped)
+
+    if total_added:
+        _maybe_prompt_upgrade(config)
+
+
+# ---------------------------------------------------------------------------
 # Shared version picker helpers
 # ---------------------------------------------------------------------------
 
@@ -655,16 +738,54 @@ def _upgrade_entry_with_choose(entry, versions, entries_dir, force_prompt=False)
 # Mod commands
 # ---------------------------------------------------------------------------
 
-def cmd_add(config, slug):
-    if any(m["slug"] == slug for m in config.get("mods", [])):
-        print(f"'{slug}' is already in the mod list.")
-        return
-    print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
-    name = get_project_name(slug)
-    print(f"  found: {name}")
-    config.setdefault("mods", []).append({"slug": slug, "name": name, "file": None, "pending": True})
-    save_config(config)
-    print(f"Added '{name}'. Run 'upgrade' to download it.")
+def _add_slugs(config, entries_key, slugs):
+    """
+    Register each slug in `slugs` under config[entries_key], skipping any
+    that are already present (within this call or already in the config).
+    Returns (added, skipped): added is a list of (slug, name) tuples,
+    skipped is a list of slugs that were already registered.
+    """
+    existing = {e["slug"] for e in config.get(entries_key, [])}
+    added   = []
+    skipped = []
+    for slug in slugs:
+        if slug in existing:
+            skipped.append(slug)
+            continue
+        print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
+        name = get_project_name(slug)
+        print(f"  found: {name}")
+        config.setdefault(entries_key, []).append({"slug": slug, "name": name, "file": None, "pending": True})
+        existing.add(slug)
+        added.append((slug, name))
+    if added:
+        save_config(config)
+    return added, skipped
+
+
+def _print_add_summary(label, added, skipped):
+    if added:
+        print(f"\nAdded {len(added)} {label}: {', '.join(n for _, n in added)}.")
+        print("Run 'upgrade' to download them.")
+    if skipped:
+        print(f"Already registered, skipped {len(skipped)}: {', '.join(skipped)}.")
+    if not added and not skipped:
+        print("Nothing to add.")
+
+
+def _maybe_prompt_upgrade(config):
+    resp = input("Upgrade now? [Y/n]: ").strip().lower()
+    if resp in ("", "y", "yes"):
+        cmd_upgrade(config)
+
+
+def cmd_add(config, slugs, prompt_upgrade=True, announce=True):
+    added, skipped = _add_slugs(config, "mods", slugs)
+    if announce:
+        _print_add_summary("mod(s)", added, skipped)
+    if added and prompt_upgrade:
+        _maybe_prompt_upgrade(config)
+    return added, skipped
 
 
 def cmd_remove(config, slug):
@@ -783,16 +904,13 @@ def cmd_unchoose_all(config):
 # Datapack commands
 # ---------------------------------------------------------------------------
 
-def cmd_add_dp(config, slug):
-    if any(d["slug"] == slug for d in config.get("datapacks", [])):
-        print(f"'{slug}' is already in the datapack list.")
-        return
-    print(f"Looking up '{slug}' on Modrinth...", end="", flush=True)
-    name = get_project_name(slug)
-    print(f"  found: {name}")
-    config.setdefault("datapacks", []).append({"slug": slug, "name": name, "file": None, "pending": True})
-    save_config(config)
-    print(f"Added datapack '{name}'. Run 'upgrade' to download it.")
+def cmd_add_dp(config, slugs, prompt_upgrade=True, announce=True):
+    added, skipped = _add_slugs(config, "datapacks", slugs)
+    if announce:
+        _print_add_summary("datapack(s)", added, skipped)
+    if added and prompt_upgrade:
+        _maybe_prompt_upgrade(config)
+    return added, skipped
 
 
 def cmd_remove_dp(config, slug):
@@ -1075,10 +1193,15 @@ Commands:
                                   only that one mod/datapack is checked/upgraded (still
                                   respects its FROZEN/CHOOSE flags).
   set-version <version>           Change MC version and immediately run upgrade
+  config <preset>                 Batch-add every slug from Presets/Servers/<preset>.json
+                                  (matched case-insensitively). Then asks for any extra
+                                  mods/datapacks to add by hand, and offers "Upgrade now?
+                                  [Y/n]" (Enter = yes) once everything's been registered.
   list                            Show all entries (incl. FROZEN status)
 
   --- Mods ---
-  add <slug>                      Add a mod by Modrinth slug
+  add <slug> [slug2 ...]          Add one or more mods by Modrinth slug. After adding,
+                                  you're asked "Upgrade now? [Y/n]" (Enter = yes).
   remove <slug>                   Remove a mod (also deletes the JAR)
   add-manual <filename>           Register a manual JAR (never touched by upgrade)
   remove-manual <filename>        Unregister a manual mod (file is NOT deleted)
@@ -1090,7 +1213,7 @@ Commands:
   unchoose_all                    Remove the choose flag from every mod
 
   --- Datapacks ---
-  add_dp <slug>                   Add a datapack by Modrinth slug
+  add_dp <slug> [slug2 ...]       Add one or more datapacks by Modrinth slug
   remove_dp <slug>                Remove a datapack (also deletes the file)
   add_manual_dp <filename>        Register a manual datapack (never touched by upgrade)
   remove_manual_dp <filename>     Unregister a manual datapack (file is NOT deleted)
@@ -1113,6 +1236,19 @@ Commands:
   help                            Show this help text
 
 Notes:
+  - 'config <preset>' reads Presets/Servers/<preset>.json (next to this script) and
+    registers every slug listed under its "mods" / "datapacks" keys — same as running
+    'add'/'add_dp' once per slug. The preset name is matched case-insensitively
+    against filenames in that folder. It never re-registers an already-added slug.
+    Afterwards it asks, once per category, for any extra mods/datapacks to add by
+    hand (space-separated slugs, Enter to skip each), prints a summary of everything
+    added/skipped, and offers "Upgrade now? [Y/n]" (Enter = yes) to download it all
+    immediately. See Presets/Servers/README.md for the file format.
+  - 'add'/'add_dp' both accept multiple slugs in one call (e.g. 'add lithium
+    ferrite-core') — just separate them with spaces, the same way you'd pass any
+    other multiple command-line arguments. Each command prints a summary of what
+    was added/already-registered, then asks "Upgrade now? [Y/n]" (Enter = yes) if
+    anything new was added.
   - 'upgrade <slug>' upgrades just that one mod/datapack — everything else in the
     profile is left untouched. Plain 'upgrade' (no slug) still does all of them.
   - Datapacks use the 'datapack' loader on Modrinth (independent of the mod loader).
@@ -1133,6 +1269,19 @@ def _available_profiles():
     return sorted(names)
 
 
+# Every recognized command — used to spot the common mistake of typing a
+# command as the first argument and forgetting the profile in front of it.
+_ALL_COMMANDS = {
+    "init", "upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version", "config", "list",
+    "add", "remove", "add-manual", "remove-manual", "legacy_on", "legacy_off", "link",
+    "choose", "unchoose", "unchoose_all",
+    "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "legacy_on_dp", "legacy_off_dp", "link_dp",
+    "choose_dp", "unchoose_dp", "unchoose_all_dp",
+    "freeze", "unfreeze", "clear",
+    "help",
+}
+
+
 def main():
     global CONFIG_FILE
 
@@ -1145,7 +1294,12 @@ def main():
     profile = args[0]
 
     if len(args) < 2:
-        print(f"Usage: python Mcmods_server.py {profile} <command> [args...]")
+        if profile in _ALL_COMMANDS:
+            print(f"'{profile}' looks like a command, but the profile name has to come first.")
+            print(f"Usage: python Mcmods_server.py <profile> {profile} [args...]")
+            print(f"Example: python Mcmods_server.py survival {profile}")
+        else:
+            print(f"Usage: python Mcmods_server.py {profile} <command> [args...]")
         print("Run 'python Mcmods_server.py help' for the full command list.")
         sys.exit(1)
 
@@ -1181,13 +1335,16 @@ def main():
     elif cmd == "set-version":
         if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} set-version <version>"); sys.exit(1)
         cmd_set_version(config, rest[0])
+    elif cmd == "config":
+        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} config <preset>"); sys.exit(1)
+        cmd_config(config, rest[0])
     elif cmd == "list":
         cmd_list(config)
 
     # Mods
     elif cmd == "add":
-        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add <slug>"); sys.exit(1)
-        cmd_add(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add <slug> [slug2 ...]"); sys.exit(1)
+        cmd_add(config, rest)
     elif cmd == "remove":
         if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove <slug>"); sys.exit(1)
         cmd_remove(config, rest[0])
@@ -1217,8 +1374,8 @@ def main():
 
     # Datapacks
     elif cmd == "add_dp":
-        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add_dp <slug>"); sys.exit(1)
-        cmd_add_dp(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add_dp <slug> [slug2 ...]"); sys.exit(1)
+        cmd_add_dp(config, rest)
     elif cmd == "remove_dp":
         if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove_dp <slug>"); sys.exit(1)
         cmd_remove_dp(config, rest[0])

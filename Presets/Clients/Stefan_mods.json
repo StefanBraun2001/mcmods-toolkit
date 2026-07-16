@@ -1,0 +1,7 @@
+{
+  "_comment": "The mods Stefan uses frequently. Apply with: python Mcmods.py <profile> config Stefan_mods",
+  "mods": ["sodium", "sodium-extra", "lithium", "ferrite-core", "entityculling", "badoptimizations", "immediatelyfast", "krypton", "journeymap", "borderless-fullscreen", "flowermap", "appleskin", "zoomify", "lighty", "minihud", "advancements-reloaded", "health-indicators", "yacl", "fabric-language-kotlin", "cloth-config", "malilib", "entity-model-features", "entitytexturefeatures", "modmenu", "placeholder-api", "architectury", "fabric-api", "iris", "freecam", "smart-auto-attack", "smart-auto-mine"],
+  "resourcepacks": ["faithful-32x", "low-on-fire", "even-better-enchants", "fresh-animations"],
+  "shaderpacks": ["complementary-unbound"],
+  "datapacks": ["blazeandcaves-advancements-pack"]
+}

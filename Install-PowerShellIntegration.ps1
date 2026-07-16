@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Version: B_0.5 (2026-07-06) - beta.
+    Version: R_1.3 (2026-07-16).
 
     Adds 'Minecraft', 'Minecraft_server', and (optionally) 'Minecraft_backup' helper
     functions to your PowerShell profile.
@@ -60,8 +60,8 @@ param(
     [switch]$SkipBackup
 )
 
-$InstallerVersion     = "B_0.5"
-$InstallerVersionDate = "2026-07-06"
+$InstallerVersion     = "R_1.3"
+$InstallerVersionDate = "2026-07-16"
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host "This installer requires PowerShell 7 or newer (you're running $($PSVersionTable.PSVersion))."
@@ -93,7 +93,7 @@ if (-not $ScriptsFolder) {
     exit 1
 }
 
-Write-Host "Install-PowerShellIntegration.ps1 - version $InstallerVersion ($InstallerVersionDate, beta)"
+Write-Host "Install-PowerShellIntegration.ps1 - version $InstallerVersion ($InstallerVersionDate)"
 Write-Host "Scripts folder detected as: $ScriptsFolder"
 Write-Host "Note: if you move this Scripts folder later, re-run this installer with -Force from the new location."
 
