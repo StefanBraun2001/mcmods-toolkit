@@ -3,7 +3,7 @@
 """
 Mcmods.py - Minecraft mod/resourcepack/shaderpack manager (Modrinth + manual)
 
-Version: R_1.3 (2026-07-16)
+Version: R_1.4 (2026-07-24)
 
 Single script for every game profile (Main, Side, a test install, ...). The
 profile is now the first CLI argument instead of being baked into the
@@ -13,6 +13,13 @@ Each profile's config is still just Mcmods_<profile>.json next to this
 script, so existing config files keep working unchanged.
 
 Features:
+  - scan: adopt an install that already had mods/packs in it. Walks the managed
+    folders and asks, per file, for a Modrinth slug (managed + auto-updated),
+    Enter (manual entry, tracked but never touched) or 'skip'. Managed entries
+    are then asked about freeze / choose / legacy, all defaulting to no. Slugs
+    are validated against Modrinth as you type. Nothing on disk is moved,
+    renamed or deleted — scan only writes config entries. Offered during 'init'
+    and available standalone afterwards.
   - freeze / unfreeze: keep a mod/pack at its current file and skip updating it.
     Frozen entries are listed (with a warning) in the upgrade summary.
   - clear: delete mod files and quarantine resource/shader packs (incl. the shader
@@ -26,9 +33,13 @@ Features:
     upgraded/frozen/chosen normally (the file just lives in the depot instead of
     the active folder) and are flagged with a warning in the upgrade summary.
     'load' moves the file back but does NOT check for updates.
-  - shelf / unshelf: whole-profile flag for a temporarily unused install.
-    While shelved, 'upgrade' is blocked outright with an error; every other
-    command warns and requires explicit confirmation before it runs.
+  - shelf / unshelf: park a whole install you won't use for a while but whose
+    config you want to keep (typically to bring it back on a newer Minecraft
+    version). 'shelf' loads every unloaded entry back out of the depot, then
+    offers to run 'clear all' so the install's folders are left empty, then
+    sets the flag. The config itself is kept in full. While shelved, 'upgrade'
+    is blocked outright with an error; every other command warns and requires
+    explicit confirmation before it runs.
   - add_dp / remove_dp / etc.: datapacks, tracked and auto-updated from
     Modrinth like everything else, but since a datapack belongs to a world
     (not an install), its file is kept in the depot's "Datapacks" subfolder
@@ -47,6 +58,7 @@ Features:
 
 Usage:
   python Mcmods.py <profile> init
+  python Mcmods.py <profile> scan                  # adopt files already in the folders
   python Mcmods.py <profile> upgrade [slug]        # omit slug to upgrade everything
   python Mcmods.py <profile> set-version <version>
   python Mcmods.py <profile> config <preset>        # batch-add every slug from a preset file
@@ -115,8 +127,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.3"
-SCRIPT_VERSION_DATE = "2026-07-16"
+SCRIPT_VERSION      = "R_1.4"
+SCRIPT_VERSION_DATE = "2026-07-24"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE = None  # set in main() once the profile is known
@@ -224,6 +236,24 @@ def get_project_name(slug):
         return data.get("title", slug)
     except Exception:
         return slug
+
+
+def lookup_project(slug):
+    """
+    Resolve a slug to its Modrinth project title, reporting failure instead of
+    hiding it. Returns (title, None) or (None, reason). Used by 'scan', where a
+    typo'd slug must be caught at the prompt — get_project_name() falls back to
+    the slug itself, which would silently bake the typo into the config.
+    """
+    try:
+        data = modrinth_get(f"/project/{slug}")
+        return data.get("title", slug), None
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None, f"no project '{slug}' on Modrinth"
+        return None, f"HTTP {e.code}: {e.reason}"
+    except Exception as e:
+        return None, str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +554,175 @@ def cmd_init():
     migrate_depot_layout(config)
     print(f"\nConfig saved to {CONFIG_FILE}")
     print(f"Datapacks (once added) are kept in: {get_datapack_depot_dir(config)}")
+
+    if _prompt_yn("\nScan those folders now and register what's already in them?",
+                  default=True, indent=""):
+        print()
+        cmd_scan(config)
+
+    added, skipped = _prompt_extra_adds(
+        config,
+        "\nAdd anything else by Modrinth slug? (space-separated, Enter to skip each)"
+    )
+    if added:
+        print()
+        _print_add_summary("entrie(s)", added, skipped)
+        _maybe_prompt_upgrade(config)
+
+
+# ---------------------------------------------------------------------------
+# Scan: register files that are already sitting in the managed folders.
+# Runs from 'init' and standalone via the 'scan' command — 'init' refuses to
+# run once a config exists, so standalone is the only way to rescan a folder
+# you've dropped new files into by hand.
+# ---------------------------------------------------------------------------
+
+# (label, managed key, manual key, directory config key, accepted extensions)
+# A None directory key means the category has no live game folder — datapacks
+# live in the depot, see get_datapack_depot_dir().
+_SCAN_CATEGORIES = [
+    ("Mods",           "mods",          "manual_mods",          "mods_dir",          (".jar",)),
+    ("Resource packs", "resourcepacks", "manual_resourcepacks", "resourcepacks_dir", (".zip",)),
+    ("Shader packs",   "shaderpacks",   "manual_shaderpacks",   "shaderpacks_dir",   (".zip",)),
+    ("Datapacks",      "datapacks",     "manual_datapacks",     None,                (".zip",)),
+]
+
+
+def _prompt_yn(label, default=False, indent="      "):
+    resp = input(f"{indent}{label} {'[Y/n]' if default else '[y/N]'}: ").strip().lower()
+    if not resp:
+        return default
+    return resp in ("y", "yes")
+
+
+def _prompt_entry_flags():
+    """
+    Ask the per-entry flags for a freshly scanned managed entry. Everything
+    defaults to off, so a run of plain Enters registers a normal auto-updating
+    entry. Returns the extra config keys to merge into it.
+    """
+    extra = {}
+    if _prompt_yn("Freeze it (keep this exact file, skip updates)?"):
+        extra["frozen"] = True
+    # 'choose' and manual-vs-managed can't collide: a manual entry is a bare
+    # filename in manual_<category> with no slug to pick versions for, so it
+    # never reaches this prompt in the first place.
+    if _prompt_yn("Pick versions by hand on upgrade (choose)?"):
+        extra["choose"] = True
+    legacy = input("      Legacy fallback MC version (Enter = none): ").strip()
+    if legacy:
+        extra["legacy_version"] = legacy
+    return extra
+
+
+def _scan_directory(config, label, key, manual_key, directory, extensions):
+    """
+    Walk `directory` and offer every file in it for registration. Returns
+    (registered, manual, linked, skipped) filename lists.
+    """
+    registered, manual, linked, skipped = [], [], [], []
+
+    if not directory:
+        print(f"-- {label} --  no directory configured, skipped.\n")
+        return registered, manual, linked, skipped
+
+    d = Path(directory)
+    if not d.is_dir():
+        print(f"-- {label} --  {d} doesn't exist, skipped.\n")
+        return registered, manual, linked, skipped
+
+    # Files only: an entry's "file" is later deleted with unlink() and moved
+    # with shutil.move(), so a folder-style shaderpack would break both.
+    files = sorted(p.name for p in d.iterdir()
+                   if p.is_file() and p.suffix.lower() in extensions)
+    if not files:
+        print(f"-- {label} --  nothing to scan in {d}.\n")
+        return registered, manual, linked, skipped
+
+    print(f"-- {label} --  {len(files)} file(s) in {d}")
+
+    entries     = config.setdefault(key, [])
+    manual_list = config.setdefault(manual_key, [])
+
+    for i, filename in enumerate(files, 1):
+        if filename in manual_list or any(e.get("file") == filename for e in entries):
+            print(f"  [{i}/{len(files)}] {filename}  — already registered.")
+            skipped.append(filename)
+            continue
+
+        print(f"\n  [{i}/{len(files)}] {bold(filename)}")
+        title = None
+        while True:
+            slug = input("      Modrinth slug (Enter = manual, 'skip' = ignore): ").strip()
+            if slug.lower() == "skip":
+                slug = None
+                break
+            if not slug:
+                break
+            print(f"      Looking up '{slug}' ...", end="", flush=True)
+            title, err = lookup_project(slug)
+            if err:
+                print(f"  {err}")
+                print("      Try again, or press Enter for manual / type 'skip'.")
+                continue
+            print(f"  found: {title}")
+            break
+
+        if slug is None:
+            print("      Skipped — file left alone and unmanaged.")
+            skipped.append(filename)
+            continue
+
+        if not slug:
+            manual_list.append(filename)
+            manual.append(filename)
+            save_config(config)
+            print("      Registered as a manual entry (never touched by upgrade).")
+            continue
+
+        existing = next((e for e in entries if e["slug"] == slug), None)
+        if existing:
+            existing["file"]    = filename
+            existing["pending"] = False
+            linked.append(filename)
+            print(f"      '{slug}' was already registered — linked this file to it, "
+                  f"flags left as they were.")
+        else:
+            entry = {"slug": slug, "name": title, "file": filename, "pending": False}
+            entry.update(_prompt_entry_flags())
+            entries.append(entry)
+            registered.append(filename)
+        save_config(config)
+
+    print()
+    return registered, manual, linked, skipped
+
+
+def cmd_scan(config):
+    """
+    Register what's already in the managed folders. Files that are already
+    known are left alone, so this is safe to re-run at any time.
+    """
+    print("=== scan ===")
+    print("For each file: type its Modrinth slug to have it managed and auto-updated,")
+    print("press Enter to register it as a manual entry (tracked but never touched),")
+    print("or type 'skip' to leave it unmanaged entirely.")
+    print("Managed entries then ask for freeze / choose / legacy — Enter accepts the")
+    print("default (no) for each.\n")
+
+    totals = [0, 0, 0, 0]
+    for label, key, manual_key, dir_key, exts in _SCAN_CATEGORIES:
+        directory = get_datapack_depot_dir(config) if dir_key is None else config.get(dir_key, "")
+        for n, found in enumerate(_scan_directory(config, label, key, manual_key, directory, exts)):
+            totals[n] += len(found)
+
+    print("=== scan summary ===")
+    print(f"  Registered as managed:   {totals[0]}")
+    print(f"  Registered as manual:    {totals[1]}")
+    print(f"  Linked to existing slug: {totals[2]}")
+    print(f"  Skipped:                 {totals[3]}")
+    if totals[0] or totals[2]:
+        print("\nRun 'upgrade' to pull newer versions of everything now managed.")
 
 
 def cmd_upgrade(config, target=None):
@@ -974,14 +1173,11 @@ def cmd_config(config, name):
         total_skipped += skipped
         print()
 
-    print("Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)")
-    for label, key, add_fn in categories:
-        extra = input(f"  Extra {label.lower()}: ").strip()
-        if not extra:
-            continue
-        added, skipped = add_fn(config, extra.split(), prompt_upgrade=False, announce=False)
-        total_added   += added
-        total_skipped += skipped
+    extra_added, extra_skipped = _prompt_extra_adds(
+        config, "Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)"
+    )
+    total_added   += extra_added
+    total_skipped += extra_skipped
     print()
 
     print("=== Preset summary ===")
@@ -1037,6 +1233,30 @@ def _maybe_prompt_upgrade(config):
     resp = input("Upgrade now? [Y/n]: ").strip().lower()
     if resp in ("", "y", "yes"):
         cmd_upgrade(config)
+
+
+def _prompt_extra_adds(config, prompt_line):
+    """
+    Ask once per category for extra slugs to register by hand. Shared by
+    'config <preset>' and 'init'. Returns (added, skipped) in the same shape
+    as _add_slugs, so callers can fold it into their own summary.
+    """
+    categories = [
+        ("Mods",           cmd_add),
+        ("Resource packs", cmd_add_rp),
+        ("Shader packs",   cmd_add_sp),
+        ("Datapacks",      cmd_add_dp),
+    ]
+    total_added, total_skipped = [], []
+    print(prompt_line)
+    for label, add_fn in categories:
+        extra = input(f"  Extra {label.lower()}: ").strip()
+        if not extra:
+            continue
+        added, skipped = add_fn(config, extra.split(), prompt_upgrade=False, announce=False)
+        total_added   += added
+        total_skipped += skipped
+    return total_added, total_skipped
 
 
 def cmd_add(config, slugs, prompt_upgrade=True, announce=True):
@@ -1722,19 +1942,42 @@ def cmd_shelf(config):
         print("This profile is already shelved.")
         return
 
-    still_present = []
-    for key in _FREEZE_CATEGORIES:
-        for e in config.get(key, []):
-            if e.get("file"):
-                still_present.append(e.get("name", e["slug"]))
+    # Shelving parks an install you don't want around for a while but whose
+    # config you want to keep (usually to bring it back on a newer MC version).
+    # So: pull everything back out of the depot first, leaving the profile in
+    # one consistent place, then offer to empty it out. Whatever you keep stays
+    # in its normal game folder rather than being split across the depot.
+    unloaded = [(e, key) for key in _FREEZE_CATEGORIES
+                for e in config.get(key, []) if e.get("unloaded")]
+    if unloaded:
+        print(f"Loading {len(unloaded)} unloaded entr{'y' if len(unloaded) == 1 else 'ies'} "
+              f"back out of the depot first:")
+        for entry, key in unloaded:
+            _load_one(config, entry, key)
+        save_config(config)
+        print()
+
+    still_present = [e.get("name", e["slug"]) for key in _FREEZE_CATEGORIES
+                     for e in config.get(key, []) if e.get("file")]
     if still_present:
-        print(f"Note: {len(still_present)} entr{'y' if len(still_present) == 1 else 'ies'} still have a file present: "
-              f"{', '.join(still_present)}")
-        print("Consider running 'clear all' first if you want a fully empty profile before shelving.\n")
+        n = len(still_present)
+        print(f"{n} entr{'y' if n == 1 else 'ies'} still ha{'s' if n == 1 else 've'} a file on disk:")
+        print(f"  {', '.join(still_present)}")
+        print("Shelving keeps the config — the files don't have to stay. 'clear all' deletes")
+        print("mod JARs (re-downloaded on the next upgrade after unshelving) and moves")
+        print("resource/shader/data packs into the quarantine folder.")
+        if _prompt_yn("Clear them out now?", default=True, indent=""):
+            print()
+            cmd_clear(config, "all")
+            print()
+        else:
+            print("Leaving the files where they are.\n")
 
     config["shelved"] = True
     save_config(config)
-    print("Profile SHELVED.")
+    print("Profile SHELVED. The config is kept in full — every mod/pack, its flags and its"
+          "\nversion history stay registered, ready to be brought back (on a newer Minecraft"
+          "\nversion if you like) with 'unshelf' + 'set-version' + 'upgrade'.")
     print("  - 'upgrade' (and set-version / upgrade_chooseall / upgrade_masterchoose) will be blocked with an error.")
     print("  - Every other command will ask for confirmation before proceeding.")
     print("Run 'unshelf' to resume normal operation.")
@@ -1972,7 +2215,15 @@ A profile is created the first time you run its 'init', and deleted simply by
 deleting its Mcmods_<profile>.json file — there's no dedicated delete command.
 
 Commands:
-  init                            Interactive setup — creates the config file
+  init                            Interactive setup — creates the config file, then
+                                  offers to 'scan' the folders and to add extra slugs
+  scan                            Walk the managed folders and register the files
+                                  already in them, one prompt per file: a Modrinth slug
+                                  makes it managed, Enter makes it a manual entry, 'skip'
+                                  leaves it unmanaged. Managed entries are then asked
+                                  about freeze / choose / legacy (all default to no).
+                                  Already-registered files are left alone, so it's safe
+                                  to re-run whenever you drop new files in by hand.
   upgrade [slug]                  Download/update mods, resource packs, and shader packs.
                                   With a slug, only that one mod/pack is checked/upgraded
                                   (still respects its FROZEN/UNLOADED/CHOOSE flags).
@@ -2028,10 +2279,13 @@ Commands:
                                   (incl. the shader .txt config). 'all' covers everything.
 
   --- Shelf / unshelf (whole profile) ---
-  shelf                           Mark the whole profile as shelved. 'upgrade' (and
-                                  set-version / upgrade_chooseall / upgrade_masterchoose)
-                                  is then blocked with an error; every other command
-                                  warns and requires typing 'continue' to proceed.
+  shelf                           Park the whole profile: loads every unloaded entry back
+                                  out of the depot, offers to 'clear all' so the install's
+                                  folders are left empty, then marks it shelved. The config
+                                  is kept in full. 'upgrade' (and set-version /
+                                  upgrade_chooseall / upgrade_masterchoose) is then blocked
+                                  with an error; every other command warns and requires
+                                  typing 'continue' to proceed.
   unshelf                        Clear the shelved flag, resume normal operation.
 
   --- Manual version selection ---
@@ -2050,6 +2304,16 @@ Commands:
   help                            Show this help text
 
 Notes:
+  - 'scan' is how you adopt a folder that already had mods/packs in it before this
+    script was involved. It never moves, renames or deletes anything — it only writes
+    config entries pointing at the files that are already there, with 'file' set and
+    'pending' cleared, so the next 'upgrade' replaces one only if Modrinth has a newer
+    version. Slugs are validated against Modrinth as you type them (a typo re-prompts
+    instead of being written to the config). Entering a slug that's already registered
+    links the file to that entry instead of creating a duplicate.
+  - Only loose files are scanned (.jar for mods, .zip for packs/datapacks). Folder-style
+    shaderpacks are ignored — the rest of the script assumes an entry's file is a single
+    file it can delete or move.
   - 'config <preset>' reads Presets/Clients/<preset>.json (next to this script) and
     registers every slug listed under its "mods" / "resourcepacks" / "shaderpacks" /
     "datapacks" keys — same as running 'add'/'add_rp'/'add_sp'/'add_dp' once per slug.
@@ -2087,8 +2351,13 @@ Notes:
     summary and 'list'. 'load' moves the file back to its active folder but performs
     no update check. Freeze and unload are independent and can be combined.
   - 'shelf' is a whole-profile flag, unlike freeze/unload which target one entry (or
-    'all'). It doesn't touch any files by itself — pair it with 'clear all' first if
-    you want an empty profile. While shelved, 'upgrade' always errors out; every other
+    'all'). It's for an install you're parking but whose config you want to keep, so it
+    tidies up on the way out: every unloaded entry is loaded back out of the depot first
+    (leaving the depot's Shelf folder empty and the profile in one place), then it offers
+    to run 'clear all' — mod JARs deleted, resource/shader/data packs quarantined — and
+    you can decline to keep the files. Either way the config survives intact, so
+    'unshelf' + 'set-version' + 'upgrade' rebuilds the install on a newer Minecraft
+    version later. While shelved, 'upgrade' always errors out; every other
     command (except 'list'/'help'/'shelf'/'unshelf') prints a warning and requires
     typing 'continue' at the prompt, so accidental changes to a parked profile need a
     deliberate confirmation.
@@ -2120,7 +2389,7 @@ def _available_profiles():
 # Every recognized command — used to spot the common mistake of typing a
 # command as the first argument and forgetting the profile in front of it.
 _ALL_COMMANDS = {
-    "init", "upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version", "config", "list",
+    "init", "scan", "upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version", "config", "list",
     "add", "remove", "add-manual", "remove-manual", "legacy_on", "legacy_off", "choose", "unchoose",
     "unchoose_all", "link",
     "add_rp", "remove_rp", "add_manual_rp", "remove_manual_rp", "link_rp",
@@ -2208,6 +2477,8 @@ def main():
         cmd_config(config, rest[0])
     elif cmd == "list":
         cmd_list(config)
+    elif cmd == "scan":
+        cmd_scan(config)
 
     # Mods
     elif cmd == "add":

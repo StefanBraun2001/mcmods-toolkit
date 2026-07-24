@@ -3,7 +3,7 @@
 """
 Mcmods_server.py - Minecraft server mod/datapack manager (Modrinth)
 
-Version: R_1.3 (2026-07-16)
+Version: R_1.4 (2026-07-24)
 
 Multi-profile server variant of Mcmods_templatev2.py (each profile is one
 server's mod/datapack set). The profile is the first CLI argument, e.g.
@@ -16,6 +16,7 @@ Resource packs and shader packs are not supported.
 
 Usage:
   python Mcmods_server.py <profile> init
+  python Mcmods_server.py <profile> scan            # adopt files already in the folder
   python Mcmods_server.py <profile> upgrade [slug]  # omit slug to upgrade everything
   python Mcmods_server.py <profile> set-version <version>
   python Mcmods_server.py <profile> config <preset>  # batch-add every slug from a preset file
@@ -71,8 +72,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.3"
-SCRIPT_VERSION_DATE = "2026-07-16"
+SCRIPT_VERSION      = "R_1.4"
+SCRIPT_VERSION_DATE = "2026-07-24"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE    = None  # set in main() once the profile is known
@@ -162,6 +163,24 @@ def get_latest_version(slug, mc_version, loader):
     if error:
         return None, error
     return versions[0], None
+
+
+def lookup_project(slug):
+    """
+    Resolve a slug to its Modrinth project title, reporting failure instead of
+    hiding it. Returns (title, None) or (None, reason). Used by 'scan', where a
+    typo'd slug must be caught at the prompt — get_project_name() falls back to
+    the slug itself, which would silently bake the typo into the config.
+    """
+    try:
+        data = modrinth_get(f"/project/{slug}")
+        return data.get("title", slug), None
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None, f"no project '{slug}' on Modrinth"
+        return None, f"HTTP {e.code}: {e.reason}"
+    except Exception as e:
+        return None, str(e)
 
 
 def get_project_name(slug):
@@ -404,6 +423,176 @@ def cmd_init():
     print(f"\nConfig saved to {CONFIG_FILE}")
     print(f"Mods and datapacks will be downloaded to: {mods_dir}")
 
+    if _prompt_yn("\nScan that folder now and register what's already in it?",
+                  default=True, indent=""):
+        print()
+        cmd_scan(config)
+
+    added, skipped = _prompt_extra_adds(
+        config,
+        "\nAdd anything else by Modrinth slug? (space-separated, Enter to skip each)"
+    )
+    if added:
+        print()
+        _print_add_summary("entrie(s)", added, skipped)
+        _maybe_prompt_upgrade(config)
+
+
+# ---------------------------------------------------------------------------
+# Scan: register files that are already sitting in the download folder.
+# Runs from 'init' and standalone via the 'scan' command — 'init' refuses to
+# run once a config exists, so standalone is the only way to rescan a folder
+# you've dropped new files into by hand.
+#
+# Unlike the client script, mods and datapacks share one folder here, so the
+# category can't be derived from the location and has to be asked for. The
+# extension is a good enough default: server mods are .jar, datapacks .zip.
+# ---------------------------------------------------------------------------
+
+def _prompt_yn(label, default=False, indent="      "):
+    resp = input(f"{indent}{label} {'[Y/n]' if default else '[y/N]'}: ").strip().lower()
+    if not resp:
+        return default
+    return resp in ("y", "yes")
+
+
+def _prompt_category(filename):
+    """
+    Ask whether a scanned file is a mod or a datapack, defaulting on extension.
+    Returns "mods" or "datapacks".
+    """
+    default = "datapacks" if filename.lower().endswith(".zip") else "mods"
+    label   = "datapack" if default == "datapacks" else "mod"
+    resp = input(f"      Mod or datapack? [m/d, Enter = {label}]: ").strip().lower()
+    if not resp:
+        return default
+    if resp.startswith("d"):
+        return "datapacks"
+    if resp.startswith("m"):
+        return "mods"
+    print(f"      Unrecognised — using {label}.")
+    return default
+
+
+def _prompt_entry_flags():
+    """
+    Ask the per-entry flags for a freshly scanned managed entry. Everything
+    defaults to off, so a run of plain Enters registers a normal auto-updating
+    entry. Returns the extra config keys to merge into it.
+    """
+    extra = {}
+    if _prompt_yn("Freeze it (keep this exact file, skip updates)?"):
+        extra["frozen"] = True
+    # 'choose' and manual-vs-managed can't collide: a manual entry is a bare
+    # filename in manual_<category> with no slug to pick versions for, so it
+    # never reaches this prompt in the first place.
+    if _prompt_yn("Pick versions by hand on upgrade (choose)?"):
+        extra["choose"] = True
+    legacy = input("      Legacy fallback MC version (Enter = none): ").strip()
+    if legacy:
+        extra["legacy_version"] = legacy
+    return extra
+
+
+def cmd_scan(config):
+    """
+    Register what's already in the download folder. Files that are already
+    known are left alone, so this is safe to re-run at any time.
+    """
+    directory = config.get("mods_dir", "")
+    if not directory:
+        print("No download directory configured.")
+        return
+    d = Path(directory)
+    if not d.is_dir():
+        print(f"{d} doesn't exist — nothing to scan.")
+        return
+
+    # Files only: an entry's "file" is later deleted with unlink(), so a folder
+    # would break that.
+    files = sorted(p.name for p in d.iterdir()
+                   if p.is_file() and p.suffix.lower() in (".jar", ".zip"))
+    if not files:
+        print(f"Nothing to scan in {d}.")
+        return
+
+    print("=== scan ===")
+    print("For each file: type its Modrinth slug to have it managed and auto-updated,")
+    print("press Enter to register it as a manual entry (tracked but never touched),")
+    print("or type 'skip' to leave it unmanaged entirely.")
+    print("Managed entries are then asked whether they're a mod or a datapack, and")
+    print("about freeze / choose / legacy — Enter accepts the default for each.\n")
+    print(f"{len(files)} file(s) in {d}")
+
+    registered, manual, linked, skipped = [], [], [], []
+
+    for i, filename in enumerate(files, 1):
+        already_manual = any(filename in config.get(k, [])
+                             for k in ("manual_mods", "manual_datapacks"))
+        already_managed = any(e.get("file") == filename
+                              for k, _ in _FREEZE_CATEGORIES
+                              for e in config.get(k, []))
+        if already_manual or already_managed:
+            print(f"  [{i}/{len(files)}] {filename}  — already registered.")
+            skipped.append(filename)
+            continue
+
+        print(f"\n  [{i}/{len(files)}] {bold(filename)}")
+        title = None
+        while True:
+            slug = input("      Modrinth slug (Enter = manual, 'skip' = ignore): ").strip()
+            if slug.lower() == "skip":
+                slug = None
+                break
+            if not slug:
+                break
+            print(f"      Looking up '{slug}' ...", end="", flush=True)
+            title, err = lookup_project(slug)
+            if err:
+                print(f"  {err}")
+                print("      Try again, or press Enter for manual / type 'skip'.")
+                continue
+            print(f"  found: {title}")
+            break
+
+        if slug is None:
+            print("      Skipped — file left alone and unmanaged.")
+            skipped.append(filename)
+            continue
+
+        key = _prompt_category(filename)
+
+        if not slug:
+            manual_key = "manual_mods" if key == "mods" else "manual_datapacks"
+            config.setdefault(manual_key, []).append(filename)
+            manual.append(filename)
+            save_config(config)
+            print("      Registered as a manual entry (never touched by upgrade).")
+            continue
+
+        entries  = config.setdefault(key, [])
+        existing = next((e for e in entries if e["slug"] == slug), None)
+        if existing:
+            existing["file"]    = filename
+            existing["pending"] = False
+            linked.append(filename)
+            print(f"      '{slug}' was already registered — linked this file to it, "
+                  f"flags left as they were.")
+        else:
+            entry = {"slug": slug, "name": title, "file": filename, "pending": False}
+            entry.update(_prompt_entry_flags())
+            entries.append(entry)
+            registered.append(filename)
+        save_config(config)
+
+    print("\n=== scan summary ===")
+    print(f"  Registered as managed:   {len(registered)}")
+    print(f"  Registered as manual:    {len(manual)}")
+    print(f"  Linked to existing slug: {len(linked)}")
+    print(f"  Skipped:                 {len(skipped)}")
+    if registered or linked:
+        print("\nRun 'upgrade' to pull newer versions of everything now managed.")
+
 
 def cmd_upgrade(config, target=None):
     mc_version = config["mc_version"]
@@ -638,14 +827,11 @@ def cmd_config(config, name):
         total_skipped += skipped
         print()
 
-    print("Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)")
-    for label, key, add_fn in categories:
-        extra = input(f"  Extra {label.lower()}: ").strip()
-        if not extra:
-            continue
-        added, skipped = add_fn(config, extra.split(), prompt_upgrade=False, announce=False)
-        total_added   += added
-        total_skipped += skipped
+    extra_added, extra_skipped = _prompt_extra_adds(
+        config, "Add anything else by hand before downloading? (space-separated slugs, Enter to skip each)"
+    )
+    total_added   += extra_added
+    total_skipped += extra_skipped
     print()
 
     print("=== Preset summary ===")
@@ -777,6 +963,28 @@ def _maybe_prompt_upgrade(config):
     resp = input("Upgrade now? [Y/n]: ").strip().lower()
     if resp in ("", "y", "yes"):
         cmd_upgrade(config)
+
+
+def _prompt_extra_adds(config, prompt_line):
+    """
+    Ask once per category for extra slugs to register by hand. Shared by
+    'config <preset>' and 'init'. Returns (added, skipped) in the same shape
+    as _add_slugs, so callers can fold it into their own summary.
+    """
+    categories = [
+        ("Mods",      cmd_add),
+        ("Datapacks", cmd_add_dp),
+    ]
+    total_added, total_skipped = [], []
+    print(prompt_line)
+    for label, add_fn in categories:
+        extra = input(f"  Extra {label.lower()}: ").strip()
+        if not extra:
+            continue
+        added, skipped = add_fn(config, extra.split(), prompt_upgrade=False, announce=False)
+        total_added   += added
+        total_skipped += skipped
+    return total_added, total_skipped
 
 
 def cmd_add(config, slugs, prompt_upgrade=True, announce=True):
@@ -1188,7 +1396,15 @@ A profile is created the first time you run its 'init', and deleted simply by
 deleting its Mcmods_server_<profile>.json file — there's no dedicated delete command.
 
 Commands:
-  init                            Interactive setup — creates the config file
+  init                            Interactive setup — creates the config file, then
+                                  offers to 'scan' the folder and to add extra slugs
+  scan                            Walk the download folder and register the files already
+                                  in it, one prompt per file: a Modrinth slug makes it
+                                  managed, Enter makes it a manual entry, 'skip' leaves it
+                                  unmanaged. Managed entries are then asked mod-or-datapack
+                                  (defaulting on .jar/.zip) and about freeze / choose /
+                                  legacy. Already-registered files are left alone, so it's
+                                  safe to re-run whenever you drop new files in by hand.
   upgrade [slug]                  Download/update all mods and datapacks. With a slug,
                                   only that one mod/datapack is checked/upgraded (still
                                   respects its FROZEN/CHOOSE flags).
@@ -1236,6 +1452,15 @@ Commands:
   help                            Show this help text
 
 Notes:
+  - 'scan' is how you adopt a folder that already had mods/datapacks in it before this
+    script was involved. It never moves, renames or deletes anything — it only writes
+    config entries pointing at the files that are already there, with 'file' set and
+    'pending' cleared, so the next 'upgrade' replaces one only if Modrinth has a newer
+    version. Slugs are validated against Modrinth as you type them (a typo re-prompts
+    instead of being written to the config). Entering a slug that's already registered
+    links the file to that entry instead of creating a duplicate. Since mods and
+    datapacks share one folder here, each managed file is also asked mod-or-datapack;
+    .jar defaults to mod, .zip to datapack.
   - 'config <preset>' reads Presets/Servers/<preset>.json (next to this script) and
     registers every slug listed under its "mods" / "datapacks" keys — same as running
     'add'/'add_dp' once per slug. The preset name is matched case-insensitively
@@ -1272,7 +1497,7 @@ def _available_profiles():
 # Every recognized command — used to spot the common mistake of typing a
 # command as the first argument and forgetting the profile in front of it.
 _ALL_COMMANDS = {
-    "init", "upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version", "config", "list",
+    "init", "scan", "upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version", "config", "list",
     "add", "remove", "add-manual", "remove-manual", "legacy_on", "legacy_off", "link",
     "choose", "unchoose", "unchoose_all",
     "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "legacy_on_dp", "legacy_off_dp", "link_dp",
@@ -1340,6 +1565,8 @@ def main():
         cmd_config(config, rest[0])
     elif cmd == "list":
         cmd_list(config)
+    elif cmd == "scan":
+        cmd_scan(config)
 
     # Mods
     elif cmd == "add":

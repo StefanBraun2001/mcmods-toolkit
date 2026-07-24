@@ -1,6 +1,6 @@
 # Minecraft Server Mod Manager — README
 
-**Script:** `Mcmods_server.py` — **Version:** R_1.3 (2026-07-16)
+**Script:** `Mcmods_server.py` — **Version:** R_1.4 (2026-07-24)
 
 This is the **server** variant of the mod manager: it downloads the mods and datapacks you want to run on a Minecraft server from [Modrinth](https://modrinth.com) into a download folder of your choosing, ready to be copied onto the server (or symlinked into it). Unlike the game-profile manager (`Mcmods.py`, see [README.md](README.md)), it has no concept of resource packs or shader packs, and it doesn't touch your actual server installation directly — it's an intermediate staging folder that you move into place yourself.
 
@@ -60,6 +60,52 @@ The script will ask you a few questions:
 | Download directory | Full path to a folder where mods/datapacks for this server should be downloaded (e.g. `C:\MC_Server_Survival`) |
 
 A config file (`Mcmods_server_<profile>.json`) is created next to the script, and the download directory is created if it doesn't already exist. **Don't delete the config file** — it tracks everything (and deleting it is also how you remove the profile, see [Profiles](#profiles)).
+
+Once the config is written, `init` offers two more steps:
+
+1. **"Scan that folder now and register what's already in it?"** (Enter = yes) — adopts files that are already in the download directory. See [Adopting an Existing Folder](#adopting-an-existing-folder-scan) below.
+2. **Extra slugs to add by hand**, for mods and datapacks — the same prompt `config <preset>` uses. Press Enter to skip. If you added anything, it then offers `Upgrade now? [Y/n]`.
+
+Both are optional; pressing Enter through them leaves you with an empty profile you can fill in later with `add`, `config` or `scan`.
+
+---
+
+## Adopting an Existing Folder (`scan`)
+
+If the download directory already has mods or datapacks in it — say you were managing that server by hand before — `scan` adopts them:
+
+```
+python Mcmods_server.py <profile> scan
+```
+
+It's offered automatically at the end of `init`, and available any time afterwards — which matters, because `init` refuses to run once a config exists, so `scan` is the only way to adopt files you drop into the folder later.
+
+**`scan` never moves, renames or deletes anything.** It only writes config entries pointing at files that are already on disk. It asks about every `.jar` and `.zip` it finds:
+
+| You type | What happens |
+|---|---|
+| A **Modrinth slug** | The file becomes a managed entry. Checked against Modrinth right away — a typo re-prompts instead of being saved. |
+| **Enter** (empty) | Registered as a **manual** entry: it shows up in `list` but `upgrade` never touches it. Same as `add-manual` / `add_manual_dp`. |
+| `skip` | Left completely alone and unmanaged. |
+
+Since mods and datapacks share one download folder here, every file you don't skip is then asked **mod or datapack** — `.jar` defaults to mod, `.zip` to datapack, and Enter accepts the default.
+
+For each file you gave a slug to, it then asks three more follow-ups. **All of them default to no — press Enter to accept:**
+
+| Prompt | Effect if you say yes |
+|---|---|
+| Freeze it? | Keeps this exact file forever, skips updates ([Freezing](#freezing-a-mod-or-datapack)) |
+| Pick versions by hand (choose)? | Prompts you to pick a version on every upgrade ([Manual Version Selection](#manual-version-selection-advanced)) |
+| Legacy fallback MC version | Type a version like `1.21.1` to use if the current one isn't available ([Legacy Fallback](#legacy-fallback)) |
+
+There's no freeze/choose/legacy prompt for manual entries — a manual entry is just a filename with no Modrinth project behind it, so there's no version to pin, pick or fall back to.
+
+Useful details:
+
+- **Files already registered are reported and skipped**, so re-running `scan` after dropping a new mod into the folder only asks about the new file.
+- **Entering a slug that's already registered links the file to that existing entry** instead of creating a duplicate — the same thing `link` does. The entry's existing freeze/choose/legacy flags are left alone.
+- Entries created by `scan` have their file recorded and are **not** marked pending, so the next `upgrade` only replaces one if Modrinth actually has a newer version.
+- **Anything you `skip`** is ignored completely — the file stays in the folder but won't appear in `list` and won't be managed.
 
 ---
 
@@ -167,6 +213,8 @@ python Mcmods_server.py <profile> add_manual_dp <filename>    # Datapacks
 ```
 
 Use `remove-manual` / `remove_manual_dp` to unregister them. The file itself is never deleted by these commands.
+
+Registering a lot of them at once is easier with [`scan`](#adopting-an-existing-folder-scan) — pressing Enter at its slug prompt registers that file as a manual entry.
 
 You can also attach a manually downloaded file to an already-managed entry so the script tracks it (e.g. so you can `freeze` it):
 

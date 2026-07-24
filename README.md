@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.3 (2026-07-16)
+**Script:** `Mcmods.py` — **Version:** R_1.4 (2026-07-24)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
@@ -86,19 +86,52 @@ A config file (`Mcmods_<profile>.json`) will be created in the same folder as th
 
 There's no separate question for a datapacks folder — datapacks are per-**world**, not per-install, so the script never places them in a live game folder. See [Datapacks](#datapacks) below.
 
+Once the config is written, `init` offers two more steps:
+
+1. **"Scan those folders now and register what's already in them?"** (Enter = yes) — walks your mods/resourcepacks/shaderpacks folders and lets you adopt the files that are already there. See [Adopting an Existing Mods Folder](#adopting-an-existing-mods-folder-scan) below.
+2. **Extra slugs to add by hand**, once per category — the same prompt `config <preset>` uses. Press Enter to skip a category. If you added anything, it then offers `Upgrade now? [Y/n]`.
+
+Both are optional; pressing Enter through them leaves you with an empty profile you can fill in later with `add`, `config` or `scan`.
+
 ---
 
-## Starting with an Existing Mods Folder
+## Adopting an Existing Mods Folder (`scan`)
 
-If you already have mods, resource packs, or shader packs installed before using this script for the first time, here's what you need to know:
+If you already have mods, resource packs, or shader packs installed before using this script for the first time, `scan` adopts them:
 
-**The script only knows about what you register.** It has no awareness of files already sitting in your folders, so nothing gets touched or deleted just by running `init` or `upgrade`.
+```
+python Mcmods.py <profile> scan
+```
 
-Here's how to handle your existing files:
+It's offered automatically at the end of `init`, and available any time afterwards — which matters, because `init` refuses to run once a config exists, so `scan` is the only way to adopt files you drop into a folder later.
 
-- **Mods that are on Modrinth** — add them with `add <slug>` and run `upgrade`. The script will download the latest version. Your old file won't be deleted automatically if it has a different filename (which it usually will, since filenames include version numbers), so you may need to clean up the old file manually afterwards.
-- **Mods you downloaded manually** (not from Modrinth) — register them with `add-manual <filename>` so the script knows about them and they show up in `list`. The file itself is never touched by this command.
-- **Anything you don't register at all** — the script ignores it completely. The file stays in the folder and Minecraft will still load it, but it won't appear in `list` and won't be managed.
+**`scan` never moves, renames or deletes anything.** It only writes config entries pointing at files that are already on disk. It walks each folder in turn (`.jar` for mods, `.zip` for resource/shader packs and depot datapacks) and asks about every file it finds:
+
+| You type | What happens |
+|---|---|
+| A **Modrinth slug** | The file becomes a managed entry. Checked against Modrinth right away — a typo re-prompts instead of being saved. |
+| **Enter** (empty) | Registered as a **manual** entry: it shows up in `list` but `upgrade` never touches it. Same as `add-manual`. |
+| `skip` | Left completely alone and unmanaged. |
+
+For each file you gave a slug to, it then asks three follow-ups. **All of them default to no — press Enter to accept:**
+
+| Prompt | Effect if you say yes |
+|---|---|
+| Freeze it? | Keeps this exact file forever, skips updates ([Freezing](#freezing-a-mod-or-pack)) |
+| Pick versions by hand (choose)? | Prompts you to pick a version on every upgrade ([Manual Version Selection](#manual-version-selection-advanced)) |
+| Legacy fallback MC version | Type a version like `1.21.1` to use if the current one isn't available ([Legacy Fallback](#legacy-fallback-for-mods)) |
+
+There's no freeze/choose/legacy prompt for manual entries — a manual entry is just a filename with no Modrinth project behind it, so there's no version to pin, pick or fall back to.
+
+Useful details:
+
+- **Files already registered are reported and skipped**, so re-running `scan` after dropping a new mod into the folder only asks about the new file.
+- **Entering a slug that's already registered links the file to that existing entry** instead of creating a duplicate — the same thing `link` does. The entry's existing freeze/choose/legacy flags are left alone.
+- Entries created by `scan` have their file recorded and are **not** marked pending, so the next `upgrade` only replaces one if Modrinth actually has a newer version.
+- **Folder-style shaderpacks are ignored** — only loose files are scanned, because the rest of the script assumes an entry's file is a single file it can delete or move.
+- **Anything you `skip`** is ignored completely. The file stays in the folder and Minecraft will still load it, but it won't appear in `list` and won't be managed.
+
+If you'd rather do it by hand, the old approach still works: `add <slug>` then `upgrade` (note the old file usually isn't deleted, since filenames include version numbers and won't match), or `add-manual <filename>` for things not on Modrinth.
 
 ---
 
@@ -221,6 +254,8 @@ python Mcmods.py <profile> add_manual_dp <filename>     # Datapacks
 
 Use `remove-manual` / `remove_manual_rp` / `remove_manual_sp` / `remove_manual_dp` to unregister them. The file itself is never deleted by these commands.
 
+Registering a lot of them at once is easier with [`scan`](#adopting-an-existing-mods-folder-scan) — pressing Enter at its slug prompt registers that file as a manual entry.
+
 ---
 
 ## Datapacks
@@ -305,21 +340,33 @@ Key points:
 
 ## Shelving a Whole Profile (Parking an Unused Install)
 
-If you have a profile (a separate config file, e.g. for a second Minecraft install) that you're not using for a while, `shelf` marks the **entire profile** as parked. Unlike `freeze`/`unload`, this isn't per-entry — it's a single flag for the whole config.
+`shelf` parks a whole install you won't be using for a while — but whose **config you want to keep**, so you can bring the same mod set back later, typically on a newer Minecraft version. Unlike `freeze`/`unload`, this isn't per-entry; it's a single flag for the whole config.
 
 ```
-python Mcmods.py <profile> clear all            # (optional) empty the profile out first
-python Mcmods.py <profile> shelf                # Mark the whole profile as shelved
+python Mcmods.py <profile> shelf                # Tidy up, empty the folders, park the profile
 
 python Mcmods.py <profile> unshelf              # Resume normal operation
+```
+
+`shelf` does three things, in this order:
+
+1. **Loads every unloaded entry back out of the depot**, so nothing is left sitting in the depot's `Shelf` folder and the whole profile is in one place.
+2. **Offers to run `clear all`** (`[Y/n]`, Enter = yes) — mod JARs are deleted, resource/shader/data packs are moved to quarantine. Decline it if you want the files left in their folders.
+3. **Marks the profile shelved.**
+
+The config file itself is never touched by any of this. Every mod, pack, datapack and their freeze/choose/legacy flags stay registered, so bringing the install back later is just:
+
+```
+python Mcmods.py <profile> unshelf
+python Mcmods.py <profile> set-version 1.21.8   # optional — park on one version, come back on another
+python Mcmods.py <profile> upgrade              # re-downloads everything that was cleared
 ```
 
 While a profile is shelved:
 
 - **`upgrade` (and `set-version`, `upgrade_chooseall`, `upgrade_masterchoose`) is blocked outright** with an error message — there's no way to skip this short of unshelving.
-- **Every other command** (`add`, `remove`, `freeze`, `unload`, `clear`, `choose`, `link`, etc.) prints a warning and asks you to type `continue` to proceed. Pressing Enter (or anything else) aborts the command. This is meant to catch accidental changes to a profile you'd parked on purpose — you can still push through if you really mean it.
+- **Every other command** (`add`, `remove`, `freeze`, `unload`, `clear`, `choose`, `link`, `scan`, etc.) prints a warning and asks you to type `continue` to proceed. Pressing Enter (or anything else) aborts the command. This is meant to catch accidental changes to a profile you'd parked on purpose — you can still push through if you really mean it.
 - `list` and `help` always work normally, and `list` prints a banner reminding you the profile is shelved.
-- Shelving doesn't touch any files by itself. If you want a fully empty profile while shelved, run `clear all` first (mods are deleted, resource/shader packs go to quarantine).
 
 ---
 

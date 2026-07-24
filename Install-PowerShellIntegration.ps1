@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Version: R_1.3 (2026-07-16).
+    Version: R_1.4 (2026-07-24).
 
     Adds 'Minecraft', 'Minecraft_server', and (optionally) 'Minecraft_backup' helper
     functions to your PowerShell profile.
@@ -60,8 +60,8 @@ param(
     [switch]$SkipBackup
 )
 
-$InstallerVersion     = "R_1.3"
-$InstallerVersionDate = "2026-07-16"
+$InstallerVersion     = "R_1.4"
+$InstallerVersionDate = "2026-07-24"
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host "This installer requires PowerShell 7 or newer (you're running $($PSVersionTable.PSVersion))."
