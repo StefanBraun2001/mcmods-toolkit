@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Version: R_1.4 (2026-07-24).
+    Version: R_1.5 (2026-08-03).
 
     Adds 'Minecraft', 'Minecraft_server', and (optionally) 'Minecraft_backup' helper
     functions to your PowerShell profile.
@@ -22,6 +22,12 @@
     Minecraft_backup is an optional world-save backup feature (see README_Backup.md). It
     is only installed if you opt in (interactively, or via -IncludeBackup). Its settings
     live in their own "Backup_Automation.json" file - no passwords are ever stored in it.
+
+    "Minecraft_backup run" sets $LASTEXITCODE (0 on success, 1 if anything failed or
+    nothing matched) so external callers - e.g. the Streamer.bot C# trigger shipped in
+    this folder - can detect failure reliably instead of scanning console text. This
+    never calls exit itself, so running it interactively in your own terminal behaves
+    exactly as before and won't close your session.
 
     This assumes Mcmods.py and Mcmods_server.py live in the same folder as this installer
     script - that folder path is detected automatically and baked into the added functions.
@@ -60,8 +66,8 @@ param(
     [switch]$SkipBackup
 )
 
-$InstallerVersion     = "R_1.4"
-$InstallerVersionDate = "2026-07-24"
+$InstallerVersion     = "R_1.5"
+$InstallerVersionDate = "2026-08-03"
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host "This installer requires PowerShell 7 or newer (you're running $($PSVersionTable.PSVersion))."
@@ -579,19 +585,31 @@ function Minecraft_backup {
     }
 
     if (`$Command -eq "run") {
-        if (-not `$Rest) { Write-Host "Usage: Minecraft_backup run <job|all> [filter]"; return }
+        if (-not `$Rest) { Write-Host "Usage: Minecraft_backup run <job|all> [filter]"; `$global:LASTEXITCODE = 1; return }
         `$query  = `$Rest[0]
         `$filter = if (`$Rest.Count -gt 1) { `$Rest[1] } else { `$null }
         `$jobs = Select-MCBackupJobs -Query `$query -Multiple
-        if (-not `$jobs) { return }
+        if (-not `$jobs) { `$global:LASTEXITCODE = 1; return }
         if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
             Write-Host "7z was not found on PATH - install 7-Zip and make sure '7z' is available in a new terminal."
+            `$global:LASTEXITCODE = 1
             return
         }
+
+        # Tracks whether anything actually got backed up (at least one job had matching
+        # worlds and an operation was attempted) and whether any operation failed, so a
+        # single, reliable exit code can be set at the end - external callers (e.g. the
+        # Streamer.bot C# trigger) can then just check the exit code instead of scanning
+        # console text. Deliberately never calls "exit" itself: this function is also used
+        # interactively, and exiting here would close the caller's PowerShell session too.
+        `$anyBackedUp = `$false
+        `$anyFailure  = `$false
+
         foreach (`$job in `$jobs) {
             Write-Host "--- Backing up '`$(`$job.label)' ---"
             if (-not (Test-Path `$job.savesDir)) {
                 Write-Host "Saves folder not found: `$(`$job.savesDir) - skipping."
+                `$anyFailure = `$true
                 continue
             }
             `$worlds = Get-ChildItem -Path `$job.savesDir -Directory
@@ -602,6 +620,7 @@ function Minecraft_backup {
             }
             Write-Host "Found `$(`$worlds.Count) world(s): `$(`$worlds.Name -join ', ')"
             New-Item -ItemType Directory -Force -Path `$job.destDir | Out-Null
+            `$anyBackedUp = `$true
 
             if (`$job.mode -eq "zip") {
                 `$stamp    = Get-Date -Format "dd.MM.yyyy HHmm"
@@ -620,13 +639,19 @@ function Minecraft_backup {
                 if (`$zipExit -ne 0) {
                     Write-Host "7-Zip failed with exit code `$zipExit"
                     `$pwd = `$null
+                    `$anyFailure = `$true
                     continue
                 }
                 Write-Host "Testing archive ..."
                 `$testArgs = @("t", `$archive)
                 if (`$job.encrypt) { `$testArgs += "-p`$pwd" }
                 & 7z @testArgs
-                if (`$LASTEXITCODE -eq 0) { Write-Host "Done. Archive verified." } else { Write-Host "Verification failed with exit code `$LASTEXITCODE" }
+                if (`$LASTEXITCODE -eq 0) {
+                    Write-Host "Done. Archive verified."
+                } else {
+                    Write-Host "Verification failed with exit code `$LASTEXITCODE"
+                    `$anyFailure = `$true
+                }
                 `$pwd = `$null
             } else {
                 `$failed = @()
@@ -643,11 +668,14 @@ function Minecraft_backup {
                 }
                 if (`$failed) {
                     Write-Host "Finished with errors. Failed: `$(`$failed -join ', ')"
+                    `$anyFailure = `$true
                 } else {
                     Write-Host "Done. `$(`$worlds.Count) world(s) copied to `$(`$job.destDir)"
                 }
             }
         }
+
+        `$global:LASTEXITCODE = if (`$anyFailure -or -not `$anyBackedUp) { 1 } else { 0 }
         return
     }
 

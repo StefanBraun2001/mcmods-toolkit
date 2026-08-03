@@ -3,7 +3,7 @@
 """
 Mcmods_server.py - Minecraft server mod/datapack manager (Modrinth)
 
-Version: R_1.4 (2026-07-24)
+Version: R_1.5 (2026-08-03)
 
 Multi-profile server variant of Mcmods_templatev2.py (each profile is one
 server's mod/datapack set). The profile is the first CLI argument, e.g.
@@ -72,8 +72,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.4"
-SCRIPT_VERSION_DATE = "2026-07-24"
+SCRIPT_VERSION      = "R_1.5"
+SCRIPT_VERSION_DATE = "2026-08-03"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE    = None  # set in main() once the profile is known

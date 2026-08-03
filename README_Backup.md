@@ -2,7 +2,7 @@
 
 **Feature:** `Minecraft_backup` — installed by `Install-PowerShellIntegration.ps1`.
 
-**Installer script version:** R_1.4 (2026-07-24).
+**Installer script version:** R_1.5 (2026-08-03).
 
 This is an optional PowerShell-only feature (there's no standalone `.py` script for it) that zips up — or plain-copies — the world folders inside a Minecraft `saves` directory into a destination folder of your choice, using 7-Zip. It supports any number of independent backup "jobs" (e.g. one per install/profile), each with its own saves folder, destination folder, and settings.
 
@@ -137,3 +137,13 @@ Minecraft_backup readme
 ```
 
 `help` prints the command list; `readme` opens this file.
+
+---
+
+## Triggering from Streamer.bot / a Stream Deck button
+
+`StreamerBot_TriggerBackup.cs`, next to this README, is a ready-to-paste "Execute C# Code" action for Streamer.bot that runs `Minecraft_backup run <job> <world>` in the background and logs success/failure — see the comment block at the top of that file for setup steps. Duplicate the action (and the two `WorldName`/`JobQuery` constants) for each button/world you want to trigger.
+
+It relies on `Minecraft_backup run` setting `$LASTEXITCODE` (0 on success, 1 on failure or if nothing matched) rather than needing to guess from console text — this is automatic, nothing to configure.
+
+---

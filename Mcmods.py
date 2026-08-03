@@ -3,7 +3,7 @@
 """
 Mcmods.py - Minecraft mod/resourcepack/shaderpack manager (Modrinth + manual)
 
-Version: R_1.4 (2026-07-24)
+Version: R_1.5 (2026-08-03)
 
 Single script for every game profile (Main, Side, a test install, ...). The
 profile is now the first CLI argument instead of being baked into the
@@ -127,8 +127,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.4"
-SCRIPT_VERSION_DATE = "2026-07-24"
+SCRIPT_VERSION      = "R_1.5"
+SCRIPT_VERSION_DATE = "2026-08-03"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE = None  # set in main() once the profile is known

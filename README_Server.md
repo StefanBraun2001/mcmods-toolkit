@@ -1,6 +1,6 @@
 # Minecraft Server Mod Manager — README
 
-**Script:** `Mcmods_server.py` — **Version:** R_1.4 (2026-07-24)
+**Script:** `Mcmods_server.py` — **Version:** R_1.5 (2026-08-03)
 
 This is the **server** variant of the mod manager: it downloads the mods and datapacks you want to run on a Minecraft server from [Modrinth](https://modrinth.com) into a download folder of your choosing, ready to be copied onto the server (or symlinked into it). Unlike the game-profile manager (`Mcmods.py`, see [README.md](README.md)), it has no concept of resource packs or shader packs, and it doesn't touch your actual server installation directly — it's an intermediate staging folder that you move into place yourself.
 

@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.4 (2026-07-24)
+**Script:** `Mcmods.py` — **Version:** R_1.5 (2026-08-03)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
