@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.5 (2026-08-03)
+**Script:** `Mcmods.py` — **Version:** R_1.6 (2026-08-16)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
@@ -246,15 +246,30 @@ Any category can be omitted or left empty. See `Presets\Clients\README.md` (and 
 Some mods or packs aren't on Modrinth (e.g. you downloaded them from a website). You can register them so the script knows about them and won't touch them:
 
 ```
-python Mcmods.py <profile> add-manual <filename>       # Mods
-python Mcmods.py <profile> add_manual_rp <filename>    # Resource packs
-python Mcmods.py <profile> add_manual_sp <filename>    # Shader packs
-python Mcmods.py <profile> add_manual_dp <filename>     # Datapacks
+python Mcmods.py <profile> add-manual <filename> [name]       # Mods
+python Mcmods.py <profile> add_manual_rp <filename> [name]    # Resource packs
+python Mcmods.py <profile> add_manual_sp <filename> [name]    # Shader packs
+python Mcmods.py <profile> add_manual_dp <filename> [name]    # Datapacks
 ```
 
-Use `remove-manual` / `remove_manual_rp` / `remove_manual_sp` / `remove_manual_dp` to unregister them. The file itself is never deleted by these commands.
+The optional `[name]` is a label for the entry, independent of the actual filename — it defaults to the filename if you don't give one. Since a manual entry has no Modrinth project behind it, `upgrade` can't check it for you, but a stable name lets you swap in a newer file yourself (see below) without the entry losing its identity when the filename changes (e.g. a version number bump).
 
-Registering a lot of them at once is easier with [`scan`](#adopting-an-existing-mods-folder-scan) — pressing Enter at its slug prompt registers that file as a manual entry.
+Use `remove-manual` / `remove_manual_rp` / `remove_manual_sp` / `remove_manual_dp <name-or-filename>` to unregister an entry. The file itself is never deleted by these commands.
+
+Registering a lot of them at once is easier with [`scan`](#adopting-an-existing-mods-folder-scan) — pressing Enter at its slug prompt registers that file as a manual entry and also asks for a name.
+
+### Updating a manual entry
+
+`upgrade` never touches manual entries — there's no Modrinth project to check. If you've downloaded a newer version by hand, copy the new file into the managed folder yourself, then point the entry at it:
+
+```
+python Mcmods.py <profile> update-manual <name-or-filename> <new_filename>       # Mods
+python Mcmods.py <profile> update_manual_rp <name-or-filename> <new_filename>    # Resource packs
+python Mcmods.py <profile> update_manual_sp <name-or-filename> <new_filename>    # Shader packs
+python Mcmods.py <profile> update_manual_dp <name-or-filename> <new_filename>    # Datapacks
+```
+
+The new file must already be sitting in the managed folder (mods/resourcepacks/shaderpacks directory, or the datapack depot folder) — this only updates the script's record and deletes the old file, it doesn't fetch anything itself. The entry keeps its name; only the tracked filename changes. For shader packs, the `.txt` config sidecar (if any) is renamed to match automatically, same as it would be for a Modrinth-managed pack.
 
 ---
 

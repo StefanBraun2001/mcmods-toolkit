@@ -3,7 +3,7 @@
 """
 Mcmods_server.py - Minecraft server mod/datapack manager (Modrinth)
 
-Version: R_1.5 (2026-08-03)
+Version: R_1.6 (2026-08-16)
 
 Multi-profile server variant of Mcmods_templatev2.py (each profile is one
 server's mod/datapack set). The profile is the first CLI argument, e.g.
@@ -23,16 +23,18 @@ Usage:
 
   python Mcmods_server.py <profile> add <slug> [slug2 ...]  # mods
   python Mcmods_server.py <profile> remove <slug>
-  python Mcmods_server.py <profile> add-manual <filename>
-  python Mcmods_server.py <profile> remove-manual <filename>
+  python Mcmods_server.py <profile> add-manual <filename> [name]
+  python Mcmods_server.py <profile> remove-manual <name|filename>
+  python Mcmods_server.py <profile> update-manual <name|filename> <new_filename>
   python Mcmods_server.py <profile> legacy_on <slug> <version>
   python Mcmods_server.py <profile> legacy_off <slug>
   python Mcmods_server.py <profile> link <slug> <filename>
 
   python Mcmods_server.py <profile> add_dp <slug> [slug2 ...]  # datapacks
   python Mcmods_server.py <profile> remove_dp <slug>
-  python Mcmods_server.py <profile> add_manual_dp <filename>
-  python Mcmods_server.py <profile> remove_manual_dp <filename>
+  python Mcmods_server.py <profile> add_manual_dp <filename> [name]
+  python Mcmods_server.py <profile> remove_manual_dp <name|filename>
+  python Mcmods_server.py <profile> update_manual_dp <name|filename> <new_filename>
   python Mcmods_server.py <profile> legacy_on_dp <slug> <version>
   python Mcmods_server.py <profile> legacy_off_dp <slug>
   python Mcmods_server.py <profile> link_dp <slug> <filename>
@@ -72,8 +74,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.5"
-SCRIPT_VERSION_DATE = "2026-08-03"
+SCRIPT_VERSION      = "R_1.6"
+SCRIPT_VERSION_DATE = "2026-08-16"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE    = None  # set in main() once the profile is known
@@ -209,6 +211,86 @@ def download_file(url, dest_path):
     with urllib.request.urlopen(req, timeout=60) as resp, open(dest_path, "wb") as f:
         while chunk := resp.read(65536):
             f.write(chunk)
+
+
+# ---------------------------------------------------------------------------
+# Manual entries — filenames with no Modrinth project behind them, so there's
+# no version to check. Each one has a "name" (a stable label, independent of
+# the actual filename) so 'update-manual' can swap in a newer file — which
+# usually has a different name (version bump) — without losing track of the
+# entry. Older configs stored these as bare filename strings; migrated to
+# {"name", "file"} dicts on load (see _migrate_manual_entries). Mods and
+# datapacks share one download folder here, so both just use mods_dir.
+# ---------------------------------------------------------------------------
+
+def _migrate_manual_entries(config):
+    for key in ("manual_mods", "manual_datapacks"):
+        lst = config.get(key)
+        if not lst:
+            continue
+        for i, item in enumerate(lst):
+            if isinstance(item, str):
+                lst[i] = {"name": item, "file": item}
+
+
+def _manual_find(config, manual_key, identifier):
+    """Match a manual entry by name first, falling back to its current filename
+    (convenient right after migration, when name == file for everyone)."""
+    lst = config.get(manual_key, [])
+    return (next((e for e in lst if e["name"] == identifier), None)
+            or next((e for e in lst if e["file"] == identifier), None))
+
+
+def _manual_label(entry):
+    return entry["name"] if entry["name"] == entry["file"] else f"{entry['name']} ({entry['file']})"
+
+
+def _manual_add(config, manual_key, filename, name, label):
+    lst = config.setdefault(manual_key, [])
+    name = name or filename
+    if any(e["name"] == name for e in lst):
+        print(f"'{name}' is already used as a manual {label} entry's name — pick a different one.")
+        return
+    if any(e["file"] == filename for e in lst):
+        print(f"'{filename}' is already registered as a manual {label}.")
+        return
+    directory = config.get("mods_dir", "")
+    if directory and not (Path(directory) / filename).exists():
+        print(f"Note: '{filename}' not found in the download directory yet.")
+    lst.append({"name": name, "file": filename})
+    save_config(config)
+    print(f"Registered manual {label}: {_manual_label(lst[-1])}")
+
+
+def _manual_remove(config, manual_key, identifier, label):
+    entry = _manual_find(config, manual_key, identifier)
+    if not entry:
+        print(f"'{identifier}' is not registered as a manual {label}.")
+        return
+    config[manual_key].remove(entry)
+    save_config(config)
+    print(f"Unregistered manual {label}: {_manual_label(entry)} (file not deleted)")
+
+
+def _manual_update(config, manual_key, identifier, new_filename, label):
+    """Swap in a newer file you've already downloaded/copied into the download
+    directory by hand — keeps the entry's name, replaces the old file."""
+    entry = _manual_find(config, manual_key, identifier)
+    if not entry:
+        print(f"'{identifier}' is not registered as a manual {label}.")
+        return
+    directory = config.get("mods_dir", "")
+    if not (Path(directory) / new_filename).exists():
+        print(f"'{new_filename}' was not found in {directory}.")
+        print("Copy the new file there first, then run this command again.")
+        return
+    old_filename = entry.get("file")
+    if old_filename and old_filename != new_filename and (Path(directory) / old_filename).exists():
+        delete_file(directory, old_filename)
+        print(f"Deleted old file: {old_filename}")
+    entry["file"] = new_filename
+    save_config(config)
+    print(f"Updated manual {label} '{entry['name']}': {old_filename}  →  {new_filename}")
 
 
 # ---------------------------------------------------------------------------
@@ -527,8 +609,9 @@ def cmd_scan(config):
     registered, manual, linked, skipped = [], [], [], []
 
     for i, filename in enumerate(files, 1):
-        already_manual = any(filename in config.get(k, [])
-                             for k in ("manual_mods", "manual_datapacks"))
+        already_manual = any(e["file"] == filename
+                             for k in ("manual_mods", "manual_datapacks")
+                             for e in config.get(k, []))
         already_managed = any(e.get("file") == filename
                               for k, _ in _FREEZE_CATEGORIES
                               for e in config.get(k, []))
@@ -564,10 +647,12 @@ def cmd_scan(config):
 
         if not slug:
             manual_key = "manual_mods" if key == "mods" else "manual_datapacks"
-            config.setdefault(manual_key, []).append(filename)
+            entry_name = input(f"      Name for this manual entry (Enter = '{filename}'): ").strip() or filename
+            config.setdefault(manual_key, []).append({"name": entry_name, "file": filename})
             manual.append(filename)
             save_config(config)
-            print("      Registered as a manual entry (never touched by upgrade).")
+            print("      Registered as a manual entry (never touched by upgrade). "
+                  "Use the matching 'update-manual*' command later to swap in a newer file.")
             continue
 
         entries  = config.setdefault(key, [])
@@ -642,7 +727,7 @@ def cmd_upgrade(config, target=None):
         for label, key in [("Manual mods", "manual_mods"), ("Manual datapacks", "manual_datapacks")]:
             manual = config.get(key, [])
             if manual:
-                print(f"\n{label} (not managed): {', '.join(manual)}")
+                print(f"\n{label} (not managed): {', '.join(_manual_label(e) for e in manual)}")
 
     print("\nDone.")
 
@@ -1010,25 +1095,16 @@ def cmd_remove(config, slug):
     print(f"Removed '{name}' from the list.")
 
 
-def cmd_add_manual(config, filename):
-    config.setdefault("manual_mods", [])
-    if filename in config["manual_mods"]:
-        print(f"'{filename}' is already registered as a manual mod.")
-        return
-    if not (Path(config["mods_dir"]) / filename).exists():
-        print(f"Note: '{filename}' not found in mods directory yet.")
-    config["manual_mods"].append(filename)
-    save_config(config)
-    print(f"Registered manual mod: {filename}")
+def cmd_add_manual(config, filename, name=None):
+    _manual_add(config, "manual_mods", filename, name, "mod")
 
 
-def cmd_remove_manual(config, filename):
-    if filename not in config.get("manual_mods", []):
-        print(f"'{filename}' is not registered as a manual mod.")
-        return
-    config["manual_mods"].remove(filename)
-    save_config(config)
-    print(f"Unregistered manual mod: {filename} (file not deleted)")
+def cmd_remove_manual(config, identifier):
+    _manual_remove(config, "manual_mods", identifier, "mod")
+
+
+def cmd_update_manual(config, identifier, new_filename):
+    _manual_update(config, "manual_mods", identifier, new_filename, "mod")
 
 
 def cmd_legacy_on(config, slug, legacy_version):
@@ -1135,26 +1211,16 @@ def cmd_remove_dp(config, slug):
     print(f"Removed datapack '{name}' from the list.")
 
 
-def cmd_add_manual_dp(config, filename):
-    config.setdefault("manual_datapacks", [])
-    if filename in config["manual_datapacks"]:
-        print(f"'{filename}' is already registered as a manual datapack.")
-        return
-    dp_dir = config.get("mods_dir", "")
-    if dp_dir and not (Path(dp_dir) / filename).exists():
-        print(f"Note: '{filename}' not found in datapacks directory yet.")
-    config["manual_datapacks"].append(filename)
-    save_config(config)
-    print(f"Registered manual datapack: {filename}")
+def cmd_add_manual_dp(config, filename, name=None):
+    _manual_add(config, "manual_datapacks", filename, name, "datapack")
 
 
-def cmd_remove_manual_dp(config, filename):
-    if filename not in config.get("manual_datapacks", []):
-        print(f"'{filename}' is not registered as a manual datapack.")
-        return
-    config["manual_datapacks"].remove(filename)
-    save_config(config)
-    print(f"Unregistered manual datapack: {filename} (file not deleted)")
+def cmd_remove_manual_dp(config, identifier):
+    _manual_remove(config, "manual_datapacks", identifier, "datapack")
+
+
+def cmd_update_manual_dp(config, identifier, new_filename):
+    _manual_update(config, "manual_datapacks", identifier, new_filename, "datapack")
 
 
 def cmd_legacy_on_dp(config, slug, legacy_version):
@@ -1373,8 +1439,8 @@ def cmd_list(config):
         manual = config.get(manual_key, [])
         if manual:
             print(f"\n  Manual {label.lower()}:")
-            for f in manual:
-                print(f"    {f}")
+            for e in manual:
+                print(f"    {_manual_label(e)}")
         print()
 
     frozen = []
@@ -1419,8 +1485,14 @@ Commands:
   add <slug> [slug2 ...]          Add one or more mods by Modrinth slug. After adding,
                                   you're asked "Upgrade now? [Y/n]" (Enter = yes).
   remove <slug>                   Remove a mod (also deletes the JAR)
-  add-manual <filename>           Register a manual JAR (never touched by upgrade)
-  remove-manual <filename>        Unregister a manual mod (file is NOT deleted)
+  add-manual <filename> [name]    Register a manual JAR (never touched by upgrade). Name
+                                  defaults to the filename; give it one to keep a stable
+                                  handle across 'update-manual' file swaps.
+  remove-manual <name|filename>   Unregister a manual mod (file is NOT deleted)
+  update-manual <name|filename> <new_filename>
+                                  Swap in a newer file you've already placed in the
+                                  download folder by hand — deletes the old file, keeps
+                                  the name.
   legacy_on <slug> <version>      Set a legacy fallback version for a mod
   legacy_off <slug>               Clear legacy mode, delete legacy file, mark pending
   link <slug> <filename>          Attach a manually downloaded file to a managed mod
@@ -1431,8 +1503,10 @@ Commands:
   --- Datapacks ---
   add_dp <slug> [slug2 ...]       Add one or more datapacks by Modrinth slug
   remove_dp <slug>                Remove a datapack (also deletes the file)
-  add_manual_dp <filename>        Register a manual datapack (never touched by upgrade)
-  remove_manual_dp <filename>     Unregister a manual datapack (file is NOT deleted)
+  add_manual_dp <filename> [name] Register a manual datapack (never touched by upgrade)
+  remove_manual_dp <name|filename>  Unregister a manual datapack (file is NOT deleted)
+  update_manual_dp <name|filename> <new_filename>
+                                  Swap in a newer file placed in the download folder
   legacy_on_dp <slug> <version>   Set a legacy fallback version for a datapack
   legacy_off_dp <slug>            Clear legacy mode, delete legacy file, mark pending
   link_dp <slug> <filename>       Attach a manually downloaded file to a managed datapack
@@ -1498,9 +1572,9 @@ def _available_profiles():
 # command as the first argument and forgetting the profile in front of it.
 _ALL_COMMANDS = {
     "init", "scan", "upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version", "config", "list",
-    "add", "remove", "add-manual", "remove-manual", "legacy_on", "legacy_off", "link",
+    "add", "remove", "add-manual", "remove-manual", "update-manual", "legacy_on", "legacy_off", "link",
     "choose", "unchoose", "unchoose_all",
-    "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "legacy_on_dp", "legacy_off_dp", "link_dp",
+    "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "update_manual_dp", "legacy_on_dp", "legacy_off_dp", "link_dp",
     "choose_dp", "unchoose_dp", "unchoose_all_dp",
     "freeze", "unfreeze", "clear",
     "help",
@@ -1550,6 +1624,7 @@ def main():
         sys.exit(1)
 
     config = load_config()
+    _migrate_manual_entries(config)
 
     if cmd == "upgrade":
         cmd_upgrade(config, rest[0] if rest else None)
@@ -1576,11 +1651,14 @@ def main():
         if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove <slug>"); sys.exit(1)
         cmd_remove(config, rest[0])
     elif cmd == "add-manual":
-        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add-manual <filename>"); sys.exit(1)
-        cmd_add_manual(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add-manual <filename> [name]"); sys.exit(1)
+        cmd_add_manual(config, rest[0], rest[1] if len(rest) > 1 else None)
     elif cmd == "remove-manual":
-        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove-manual <filename>"); sys.exit(1)
+        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove-manual <name|filename>"); sys.exit(1)
         cmd_remove_manual(config, rest[0])
+    elif cmd == "update-manual":
+        if len(rest) < 2: print(f"Usage: python Mcmods_server.py {profile} update-manual <name|filename> <new_filename>"); sys.exit(1)
+        cmd_update_manual(config, rest[0], rest[1])
     elif cmd == "legacy_on":
         if len(rest) < 2: print(f"Usage: python Mcmods_server.py {profile} legacy_on <slug> <version>"); sys.exit(1)
         cmd_legacy_on(config, rest[0], rest[1])
@@ -1607,11 +1685,14 @@ def main():
         if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove_dp <slug>"); sys.exit(1)
         cmd_remove_dp(config, rest[0])
     elif cmd == "add_manual_dp":
-        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add_manual_dp <filename>"); sys.exit(1)
-        cmd_add_manual_dp(config, rest[0])
+        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} add_manual_dp <filename> [name]"); sys.exit(1)
+        cmd_add_manual_dp(config, rest[0], rest[1] if len(rest) > 1 else None)
     elif cmd == "remove_manual_dp":
-        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove_manual_dp <filename>"); sys.exit(1)
+        if len(rest) < 1: print(f"Usage: python Mcmods_server.py {profile} remove_manual_dp <name|filename>"); sys.exit(1)
         cmd_remove_manual_dp(config, rest[0])
+    elif cmd == "update_manual_dp":
+        if len(rest) < 2: print(f"Usage: python Mcmods_server.py {profile} update_manual_dp <name|filename> <new_filename>"); sys.exit(1)
+        cmd_update_manual_dp(config, rest[0], rest[1])
     elif cmd == "legacy_on_dp":
         if len(rest) < 2: print(f"Usage: python Mcmods_server.py {profile} legacy_on_dp <slug> <version>"); sys.exit(1)
         cmd_legacy_on_dp(config, rest[0], rest[1])

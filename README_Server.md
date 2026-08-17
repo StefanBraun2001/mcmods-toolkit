@@ -1,6 +1,6 @@
 # Minecraft Server Mod Manager — README
 
-**Script:** `Mcmods_server.py` — **Version:** R_1.5 (2026-08-03)
+**Script:** `Mcmods_server.py` — **Version:** R_1.6 (2026-08-16)
 
 This is the **server** variant of the mod manager: it downloads the mods and datapacks you want to run on a Minecraft server from [Modrinth](https://modrinth.com) into a download folder of your choosing, ready to be copied onto the server (or symlinked into it). Unlike the game-profile manager (`Mcmods.py`, see [README.md](README.md)), it has no concept of resource packs or shader packs, and it doesn't touch your actual server installation directly — it's an intermediate staging folder that you move into place yourself.
 
@@ -208,13 +208,26 @@ Either category can be omitted or left empty (no `resourcepacks` / `shaderpacks`
 For mods/datapacks that aren't on Modrinth, register them so the script knows about them without touching them:
 
 ```
-python Mcmods_server.py <profile> add-manual <filename>       # Mods
-python Mcmods_server.py <profile> add_manual_dp <filename>    # Datapacks
+python Mcmods_server.py <profile> add-manual <filename> [name]       # Mods
+python Mcmods_server.py <profile> add_manual_dp <filename> [name]    # Datapacks
 ```
 
-Use `remove-manual` / `remove_manual_dp` to unregister them. The file itself is never deleted by these commands.
+The optional `[name]` labels the entry independently of its filename (defaults to the filename) — see [Updating a manual entry](#updating-a-manual-entry) below for why that matters.
 
-Registering a lot of them at once is easier with [`scan`](#adopting-an-existing-folder-scan) — pressing Enter at its slug prompt registers that file as a manual entry.
+Use `remove-manual` / `remove_manual_dp <name-or-filename>` to unregister them. The file itself is never deleted by these commands.
+
+Registering a lot of them at once is easier with [`scan`](#adopting-an-existing-folder-scan) — pressing Enter at its slug prompt registers that file as a manual entry and also asks for a name.
+
+### Updating a manual entry
+
+`upgrade` never touches manual entries — there's no Modrinth project behind them to check. If you've downloaded a newer version by hand, copy the new file into the download folder yourself, then point the entry at it:
+
+```
+python Mcmods_server.py <profile> update-manual <name-or-filename> <new_filename>       # Mods
+python Mcmods_server.py <profile> update_manual_dp <name-or-filename> <new_filename>    # Datapacks
+```
+
+The new file must already be sitting in the download folder — this only updates the script's record and deletes the old file, it doesn't fetch anything itself. The entry keeps its name; only the tracked filename changes.
 
 You can also attach a manually downloaded file to an already-managed entry so the script tracks it (e.g. so you can `freeze` it):
 
