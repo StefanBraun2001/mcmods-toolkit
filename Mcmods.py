@@ -3,7 +3,7 @@
 """
 Mcmods.py - Minecraft mod/resourcepack/shaderpack manager (Modrinth + manual)
 
-Version: R_1.7 (2026-09-15)
+Version: R_1.8 (2026-09-15)
 
 Single script for every game profile (Main, Side, a test install, ...). The
 profile is now the first CLI argument instead of being baked into the
@@ -61,6 +61,16 @@ Features:
     matched case-insensitively), then offers to add extra mods by hand and
     to run 'upgrade' immediately. add/add_rp/add_sp/add_dp all accept
     multiple space-separated slugs in one call, too.
+  - legacy_on and friends now take one or more MC versions (space-separated),
+    tried in order until one has a release — first entry = highest priority.
+    There's also a profile-wide legacy_on_global/legacy_off_global list that
+    applies to every mod/pack and takes priority over any per-entry list —
+    handy for e.g. probing known release-candidate tags right when a new MC
+    version drops, before the "real" tagged release shows up on Modrinth,
+    without configuring every entry by hand. Older single-version configs are
+    migrated automatically. Modrinth API calls are now throttled (a flat
+    minimum delay plus a rolling per-minute cap) since legacy fallback can
+    mean several extra lookups per entry.
 
 Usage:
   python Mcmods.py <profile> init
@@ -74,7 +84,7 @@ Usage:
   python Mcmods.py <profile> add-manual <filename> [name]
   python Mcmods.py <profile> remove-manual <name|filename>
   python Mcmods.py <profile> update-manual <name|filename> <new_filename>
-  python Mcmods.py <profile> legacy_on <slug> <version>
+  python Mcmods.py <profile> legacy_on <slug> <version1> [version2 ...]
   python Mcmods.py <profile> legacy_off <slug>
   python Mcmods.py <profile> link <slug> <filename>
 
@@ -83,7 +93,7 @@ Usage:
   python Mcmods.py <profile> add_manual_rp <filename> [name]
   python Mcmods.py <profile> remove_manual_rp <name|filename>
   python Mcmods.py <profile> update_manual_rp <name|filename> <new_filename>
-  python Mcmods.py <profile> legacy_on_rp <slug> <version>
+  python Mcmods.py <profile> legacy_on_rp <slug> <version1> [version2 ...]
   python Mcmods.py <profile> legacy_off_rp <slug>
   python Mcmods.py <profile> link_rp <slug> <filename>
 
@@ -92,7 +102,7 @@ Usage:
   python Mcmods.py <profile> add_manual_sp <filename> [name]
   python Mcmods.py <profile> remove_manual_sp <name|filename>
   python Mcmods.py <profile> update_manual_sp <name|filename> <new_filename>
-  python Mcmods.py <profile> legacy_on_sp <slug> <version>
+  python Mcmods.py <profile> legacy_on_sp <slug> <version1> [version2 ...]
   python Mcmods.py <profile> legacy_off_sp <slug>
   python Mcmods.py <profile> link_sp <slug> <filename>
 
@@ -101,9 +111,12 @@ Usage:
   python Mcmods.py <profile> add_manual_dp <filename> [name]
   python Mcmods.py <profile> remove_manual_dp <name|filename>
   python Mcmods.py <profile> update_manual_dp <name|filename> <new_filename>
-  python Mcmods.py <profile> legacy_on_dp <slug> <version>
+  python Mcmods.py <profile> legacy_on_dp <slug> <version1> [version2 ...]
   python Mcmods.py <profile> legacy_off_dp <slug>
   python Mcmods.py <profile> link_dp <slug> <filename>
+
+  python Mcmods.py <profile> legacy_on_global <version1> [version2 ...]  # applies to everything, priority over per-entry lists
+  python Mcmods.py <profile> legacy_off_global
 
   python Mcmods.py <profile> freeze <slug|all>      # pin (keep file, skip updates)
   python Mcmods.py <profile> unfreeze <slug|all>
@@ -130,6 +143,8 @@ import json
 import os
 import sys
 import shutil
+import time
+import collections
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -143,7 +158,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.7"
+SCRIPT_VERSION      = "R_1.8"
 SCRIPT_VERSION_DATE = "2026-09-15"
 SCRIPT_DIR          = Path(__file__).parent
 
@@ -182,6 +197,51 @@ def bold(s):    return f"{_BOLD}{s}{_RESET}"   if _COLOR else s
 
 
 # ---------------------------------------------------------------------------
+# Transient status line — a "what's happening right now" message (e.g. while
+# waiting out the rate limit, or checking a slug against Modrinth) that gets
+# overwritten in place instead of permanently cluttering scrollback. No-op
+# when stdout isn't a live terminal (piped/redirected/logged), so redirected
+# output stays clean plain text with no stray carriage returns.
+# ---------------------------------------------------------------------------
+
+_status_len = 0
+_status_context = ""   # last non-rate-limit status text, e.g. "Checking X..."
+
+
+def _status_tty():
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+
+def _status(msg, is_context=True):
+    """is_context=True (the default) remembers `msg` so a rate-limit wait
+    that interrupts it can say what it's actually waiting to do, instead of
+    replacing it with a bare 'Waiting...' that erases that information."""
+    global _status_len, _status_context
+    if is_context:
+        _status_context = msg
+    if not _status_tty():
+        return
+    pad = max(_status_len - len(msg), 0)
+    print(f"\r{msg}{' ' * pad}", end="", flush=True)
+    _status_len = len(msg)
+
+
+def _status_clear():
+    global _status_len, _status_context
+    if _status_len and _status_tty():
+        print(f"\r{' ' * _status_len}\r", end="", flush=True)
+    _status_len = 0
+    _status_context = ""
+
+
+def _progress(msg):
+    """Start a permanent (non-overwritten) progress line, first wiping out
+    any transient status line so the two don't run together on one line."""
+    _status_clear()
+    print(msg, end="", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
 
@@ -202,13 +262,70 @@ def save_config(config):
 # Modrinth API (stdlib only — no requests dependency)
 # ---------------------------------------------------------------------------
 
+# Client-side throttling for api.modrinth.com metadata calls (not the CDN
+# download URLs the API hands back — those go through download_file() and
+# hit a different host entirely). Two independent caps: a flat minimum gap
+# between any two requests, and a rolling-window cap as a backstop that still
+# holds even if the flat delay is ever changed. Whichever demands the longer
+# wait wins.
+_RATE_LIMIT_MIN_DELAY = 2.0    # seconds between consecutive requests
+_RATE_LIMIT_MAX_CALLS = 30     # max requests allowed in the rolling window
+_RATE_LIMIT_WINDOW    = 60.0   # seconds
+
+_rate_limit_last_call = None
+_rate_limit_call_times = collections.deque()
+
+
+def _rate_limit_status(reason):
+    """Build a rate-limit wait message that keeps whatever context was
+    already showing (e.g. 'Checking SomeMod on Modrinth...') instead of
+    blanking it out with a bare 'Waiting...' that says nothing useful."""
+    context = _status_context.rstrip(".").strip()
+    return f"{context} — {reason}" if context else reason.capitalize()
+
+
+def _rate_limit_wait():
+    global _rate_limit_last_call
+    now = time.monotonic()
+
+    if _rate_limit_last_call is not None:
+        elapsed = now - _rate_limit_last_call
+        if elapsed < _RATE_LIMIT_MIN_DELAY:
+            wait = _RATE_LIMIT_MIN_DELAY - elapsed
+            _status(_rate_limit_status(f"waiting {wait:.1f}s (rate limit)..."), is_context=False)
+            time.sleep(wait)
+            now = time.monotonic()
+
+    while _rate_limit_call_times and now - _rate_limit_call_times[0] >= _RATE_LIMIT_WINDOW:
+        _rate_limit_call_times.popleft()
+    if len(_rate_limit_call_times) >= _RATE_LIMIT_MAX_CALLS:
+        sleep_for = _RATE_LIMIT_WINDOW - (now - _rate_limit_call_times[0])
+        if sleep_for > 0:
+            reason = f"waiting {sleep_for:.1f}s ({_RATE_LIMIT_MAX_CALLS} requests/min reached)..."
+            _status(_rate_limit_status(reason), is_context=False)
+            time.sleep(sleep_for)
+            now = time.monotonic()
+        while _rate_limit_call_times and now - _rate_limit_call_times[0] >= _RATE_LIMIT_WINDOW:
+            _rate_limit_call_times.popleft()
+
+    _rate_limit_call_times.append(now)
+    _rate_limit_last_call = now
+
+
 def modrinth_get(path, params=None):
+    _rate_limit_wait()
     url = f"{MODRINTH_API}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    finally:
+        # Whatever status line was showing (this call's own, or a
+        # 'Checking ...' one set by the caller before making it) is stale
+        # the moment the request finishes — success or failure alike.
+        _status_clear()
 
 
 def get_all_versions(slug, mc_version, loader):
@@ -504,6 +621,106 @@ def _manual_update(config, manual_key, dir_key, identifier, new_filename, label,
 
 
 # ---------------------------------------------------------------------------
+# Legacy fallback — shared by mods and all three pack categories. An entry can
+# list several fallback MC versions (first = highest priority); there's also
+# a profile-wide global_legacy_versions list that applies to every entry and
+# takes priority over any entry's own list, useful for e.g. probing a new MC
+# version's release-candidate tags (some mods publish RC-tagged builds on
+# Modrinth that work fine on day one of the real release, before the "real"
+# tagged version shows up) without having to configure every entry by hand.
+# Older configs stored a single legacy_version string per entry; migrated to
+# a legacy_versions list on load (see _migrate_legacy_fields).
+# ---------------------------------------------------------------------------
+
+def _migrate_legacy_fields(config):
+    for key in ("mods", "resourcepacks", "shaderpacks", "datapacks"):
+        for entry in config.get(key, []):
+            old = entry.pop("legacy_version", None)
+            if old:
+                if "legacy_versions" not in entry:
+                    entry["legacy_versions"] = [old]
+                if entry.get("legacy_active") and "legacy_active_version" not in entry:
+                    entry["legacy_active_version"] = old
+
+
+def _legacy_candidates(config, entry):
+    """Merged, deduped candidate list for one entry: the global list first
+    (it takes priority), then the entry's own list, each in its given order."""
+    seen = set()
+    out = []
+    for v in list(config.get("global_legacy_versions", [])) + list(entry.get("legacy_versions", [])):
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+def _try_legacy_fallback(entry, entry_path_dir, candidates, loader, name, slug, is_shader=False):
+    """
+    Try each candidate MC version in order until one has a downloadable
+    release, downloading and flagging the entry legacy_active on success.
+    Mutates `entry` in place; caller saves the config. Returns
+    (active: bool, chosen_version_or_None, errors: [(name, msg), ...]).
+    If nothing works, any existing file is deleted and the entry is marked
+    pending — same fail-safe as before, just generalized across candidates.
+    """
+    errors = []
+
+    for candidate in candidates:
+        _status(f"Checking {name} (legacy {candidate}) on Modrinth...")
+        info, error = get_latest_version(slug, candidate, loader)
+        if error:
+            continue  # not available for this candidate — try the next one
+
+        files   = info.get("files", [])
+        primary = next((f for f in files if f.get("primary")), files[0] if files else None)
+        if not primary:
+            errors.append((name, f"no downloadable file in legacy API response ({candidate})"))
+            continue
+
+        new_filename = primary["filename"]
+
+        file_present = entry.get("file") and (Path(entry_path_dir) / entry["file"]).exists()
+        if (file_present and entry.get("file") == new_filename and entry.get("legacy_active")
+                and entry.get("legacy_active_version") == candidate):
+            return True, candidate, errors
+
+        old_filename = entry.get("file")
+        if old_filename and old_filename != new_filename:
+            delete_file(entry_path_dir, old_filename)
+
+        dest = Path(entry_path_dir) / new_filename
+        _progress(f"  Downloading {name}  ({new_filename}, legacy {candidate}) ...")
+        try:
+            download_file(primary["url"], dest)
+            print("  OK")
+
+            if is_shader and old_filename and old_filename != new_filename:
+                rename_shader_config(entry_path_dir, old_filename, new_filename)
+
+            entry["file"]                  = new_filename
+            entry["pending"]               = False
+            entry["legacy_active"]         = True
+            entry["legacy_active_version"] = candidate
+            return True, candidate, errors
+        except Exception as e:
+            print("  FAILED")
+            errors.append((name, str(e)))
+            continue
+
+    # Nothing worked — same fail-safe mods/packs already had for a single
+    # legacy version: don't strand a stale file, delete it and mark pending
+    # so the next 'upgrade' retries the current version from scratch.
+    if entry.get("file"):
+        delete_file(entry_path_dir, entry["file"])
+        entry["file"] = None
+    entry["pending"]       = True
+    entry["legacy_active"] = False
+    entry.pop("legacy_active_version", None)
+    return False, None, errors
+
+
+# ---------------------------------------------------------------------------
 # Generic upgrade logic for resource packs and shader packs
 # ---------------------------------------------------------------------------
 
@@ -518,10 +735,11 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     version was still current, but its file had gone missing (moved/deleted by
     hand), so it was silently re-fetched. Kept separate from 'updated' so
     callers don't mistake a fail-safe re-fetch for an actual new release.
-    'legacy' is a list of (name, legacy_version) tuples, mirroring mods'
-    legacy fallback: if the pack isn't available for the current MC version
-    but has a legacy_version set, that older version is fetched instead and
-    the entry is flagged legacy_active until a current release reappears.
+    'legacy' is a list of (name, chosen_legacy_version) tuples: if the pack
+    isn't available for the current MC version but has legacy candidates
+    configured (per-entry and/or the profile-wide global list — see
+    _legacy_candidates), the first one that has a release is fetched instead
+    and the entry is flagged legacy_active until a current release reappears.
     """
     mc_version = config["mc_version"]
     dirty      = False
@@ -533,7 +751,7 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     frozen       = []
     unloaded     = []
     redownloaded = []
-    legacy       = []   # (name, legacy_version)
+    legacy       = []   # (name, chosen_legacy_version)
 
     packs = config.get(category_key, [])
     if only_slug is not None:
@@ -542,7 +760,7 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     for pack in packs:
         slug       = pack["slug"]
         name       = pack.get("name", slug)
-        legacy_ver = pack.get("legacy_version")
+        candidates = _legacy_candidates(config, pack)
         is_shader  = (category_key == "shaderpacks")
         packs_dir  = entry_dir(config, pack, dir_key)
 
@@ -553,58 +771,20 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
             frozen.append(name)
             continue
 
+        _status(f"Checking {name} on Modrinth...")
         version_info, error = get_latest_version(slug, mc_version, loader)
 
         if error == "not_available" or (error and "not_available" in error):
-            if legacy_ver:
-                legacy_info, legacy_error = get_latest_version(slug, legacy_ver, loader)
-
-                if legacy_error:
-                    # Neither version works.
-                    if pack.get("file"):
-                        delete_file(packs_dir, pack["file"])
-                        pack["file"] = None
-                        dirty = True
-                    pack["pending"]       = True
-                    pack["legacy_active"] = False
-                    dirty = True
-                    outdated.append(name)
+            if candidates:
+                active, chosen, legacy_errors = _try_legacy_fallback(
+                    pack, packs_dir, candidates, loader, name, slug, is_shader=is_shader
+                )
+                dirty = True
+                errors.extend(legacy_errors)
+                if active:
+                    legacy.append((name, chosen))
                 else:
-                    files   = legacy_info.get("files", [])
-                    primary = next((f for f in files if f.get("primary")), files[0] if files else None)
-
-                    if not primary:
-                        errors.append((name, "no downloadable file in legacy API response"))
-                        continue
-
-                    new_filename = primary["filename"]
-
-                    file_present = pack.get("file") and (Path(packs_dir) / pack["file"]).exists()
-                    if file_present and pack.get("file") == new_filename and pack.get("legacy_active"):
-                        legacy.append((name, legacy_ver))
-                        continue
-
-                    old_filename = pack.get("file")
-                    if old_filename and old_filename != new_filename:
-                        delete_file(packs_dir, old_filename)
-
-                    dest = Path(packs_dir) / new_filename
-                    print(f"  Downloading {name}  ({new_filename}, legacy {legacy_ver}) ...", end="", flush=True)
-                    try:
-                        download_file(primary["url"], dest)
-                        print("  OK")
-
-                        if is_shader and old_filename and old_filename != new_filename:
-                            rename_shader_config(packs_dir, old_filename, new_filename)
-
-                        pack["file"]          = new_filename
-                        pack["pending"]       = False
-                        pack["legacy_active"] = True
-                        dirty = True
-                        legacy.append((name, legacy_ver))
-                    except Exception as e:
-                        print("  FAILED")
-                        errors.append((name, str(e)))
+                    outdated.append(name)
             elif keep_outdated:
                 pack["outdated"] = True
                 dirty = True
@@ -647,7 +827,7 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
                 delete_file(packs_dir, old_filename)
 
             dest = Path(packs_dir) / new_filename
-            print(f"  Downloading {name}  ({new_filename}) ...", end="", flush=True)
+            _progress(f"  Downloading {name}  ({new_filename}) ...")
             try:
                 download_file(primary["url"], dest)
                 print("  OK")
@@ -660,8 +840,9 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
                 pack["file"]     = new_filename
                 pack["pending"]  = False
                 pack["outdated"] = False
-                pack.pop("legacy_active",  None)
-                pack.pop("legacy_version", None)
+                pack.pop("legacy_active",         None)
+                pack.pop("legacy_active_version", None)
+                pack.pop("legacy_versions",       None)
                 dirty = True
                 if same_version_missing:
                     redownloaded.append(name)
@@ -713,6 +894,7 @@ def cmd_init():
         "manual_shaderpacks":   [],
         "datapacks":            [],
         "manual_datapacks":     [],
+        "global_legacy_versions": [],
     }
     save_config(config)
     migrate_depot_layout(config)
@@ -773,9 +955,9 @@ def _prompt_entry_flags():
     # never reaches this prompt in the first place.
     if _prompt_yn("Pick versions by hand on upgrade (choose)?"):
         extra["choose"] = True
-    legacy = input("      Legacy fallback MC version (Enter = none): ").strip()
+    legacy = input("      Legacy fallback MC version(s), space-separated, first = highest priority (Enter = none): ").strip()
     if legacy:
-        extra["legacy_version"] = legacy
+        extra["legacy_versions"] = legacy.split()
     return extra
 
 
@@ -910,7 +1092,7 @@ def cmd_upgrade(config, target=None):
     mods_updated  = []
     mods_ok       = []
     mods_pending  = []
-    mods_legacy   = []   # (name, legacy_version)
+    mods_legacy   = []   # (name, chosen_legacy_version)
     mods_errors   = []
     mods_frozen   = []
     mods_unloaded = []
@@ -926,7 +1108,7 @@ def cmd_upgrade(config, target=None):
     for mod in mods_to_process:
         slug          = mod["slug"]
         name          = mod.get("name", slug)
-        legacy_ver    = mod.get("legacy_version")
+        candidates    = _legacy_candidates(config, mod)
         mod_dir       = entry_dir(config, mod, "mods_dir")
 
         if mod.get("unloaded"):
@@ -936,6 +1118,7 @@ def cmd_upgrade(config, target=None):
             mods_frozen.append(name)
             continue
 
+        _status(f"Checking {name} on Modrinth...")
         versions, error = get_all_versions(slug, mc_version, loader)
         is_not_available = error == "not_available" or (error and "not_available" in error)
 
@@ -996,7 +1179,7 @@ def cmd_upgrade(config, target=None):
                 delete_file(mod_dir, old_filename)
 
             dest = Path(mod_dir) / new_filename
-            print(f"  Downloading {name}  ({new_filename}) ...", end="", flush=True)
+            _progress(f"  Downloading {name}  ({new_filename}) ...")
             try:
                 download_file(primary["url"], dest)
                 print("  OK")
@@ -1004,8 +1187,9 @@ def cmd_upgrade(config, target=None):
                     print(f"    Legacy mode cleared — now on current version.")
                 mod["file"]          = new_filename
                 mod["pending"]       = False
-                mod.pop("legacy_active",  None)
-                mod.pop("legacy_version", None)
+                mod.pop("legacy_active",         None)
+                mod.pop("legacy_active_version", None)
+                mod.pop("legacy_versions",       None)
                 dirty = True
                 if same_version_missing:
                     mods_redownloaded.append(name)
@@ -1020,51 +1204,16 @@ def cmd_upgrade(config, target=None):
 
         else:
             # Not available for current version — try legacy fallback
-            if legacy_ver:
-                legacy_info, legacy_error = get_latest_version(slug, legacy_ver, loader)
-
-                if legacy_error:
-                    # Neither version works
-                    if mod.get("file"):
-                        delete_file(mod_dir, mod["file"])
-                        mod["file"] = None
-                        dirty = True
-                    mod["pending"]       = True
-                    mod["legacy_active"] = False
-                    dirty = True
-                    mods_pending.append(name)
+            if candidates:
+                active, chosen, legacy_errors = _try_legacy_fallback(
+                    mod, mod_dir, candidates, loader, name, slug
+                )
+                dirty = True
+                mods_errors.extend(legacy_errors)
+                if active:
+                    mods_legacy.append((name, chosen))
                 else:
-                    files   = legacy_info.get("files", [])
-                    primary = next((f for f in files if f.get("primary")), files[0] if files else None)
-
-                    if not primary:
-                        mods_errors.append((name, "no downloadable file in legacy API response"))
-                        continue
-
-                    new_filename = primary["filename"]
-
-                    file_present = mod.get("file") and (Path(mod_dir) / mod["file"]).exists()
-                    if file_present and mod.get("file") == new_filename and mod.get("legacy_active"):
-                        mods_legacy.append((name, legacy_ver))
-                        continue
-
-                    old_filename = mod.get("file")
-                    if old_filename and old_filename != new_filename:
-                        delete_file(mod_dir, old_filename)
-
-                    dest = Path(mod_dir) / new_filename
-                    print(f"  Downloading {name}  ({new_filename}, legacy {legacy_ver}) ...", end="", flush=True)
-                    try:
-                        download_file(primary["url"], dest)
-                        print("  OK")
-                        mod["file"]          = new_filename
-                        mod["pending"]       = False
-                        mod["legacy_active"] = True
-                        dirty = True
-                        mods_legacy.append((name, legacy_ver))
-                    except Exception as e:
-                        print("  FAILED")
-                        mods_errors.append((name, str(e)))
+                    mods_pending.append(name)
             else:
                 # No legacy fallback configured
                 if mod.get("file"):
@@ -1226,6 +1375,7 @@ def cmd_upgrade_chooseall(config):
     dirty = False
     for mod in choose_mods:
         name = mod.get("name", mod["slug"])
+        _status(f"Checking {name} on Modrinth...")
         versions, error = get_all_versions(mod["slug"], mc_version, loader)
         if error or not versions:
             print(f"  ✗  {name}: {error or 'no versions found'}")
@@ -1465,51 +1615,23 @@ def cmd_update_manual(config, identifier, new_filename):
     _manual_update(config, "manual_mods", "mods_dir", identifier, new_filename, "mod")
 
 
-def cmd_legacy_on(config, slug, legacy_version):
-    mod = next((m for m in config.get("mods", []) if m["slug"] == slug), None)
-    if not mod:
-        print(f"No managed mod with slug '{slug}' found. Add it first with 'add'.")
-        return
-    name = mod.get("name", slug)
-    mod["legacy_version"] = legacy_version
-    save_config(config)
-    print(f"Legacy fallback set for '{name}': will use {legacy_version} if {config['mc_version']} is unavailable.")
-    print("Running upgrade to apply...")
-    cmd_upgrade(config)
-
-
-def cmd_legacy_off(config, slug):
-    mod = next((m for m in config.get("mods", []) if m["slug"] == slug), None)
-    if not mod:
-        print(f"No managed mod with slug '{slug}' found.")
-        return
-    name = mod.get("name", slug)
-    if mod.get("file") and mod.get("legacy_active"):
-        if delete_file(entry_dir(config, mod, "mods_dir"), mod["file"]):
-            print(f"Deleted legacy file: {mod['file']}")
-        mod["file"] = None
-    mod["pending"]       = True
-    mod["legacy_active"] = False
-    mod.pop("legacy_version", None)
-    save_config(config)
-    print(f"Legacy mode cleared for '{name}'. Marked as pending — run 'upgrade' to retry current version.")
-
-
 # ---------------------------------------------------------------------------
-# Legacy fallback for resource packs / shader packs / datapacks — same idea as
-# mods' legacy_on/legacy_off above, generalized since all three pack
-# categories share upgrade_pack_category().
+# Legacy fallback commands — shared by mods and all three pack categories.
 # ---------------------------------------------------------------------------
 
-def _legacy_on(config, category_key, dir_key, slug, legacy_version, label, add_cmd):
+def _legacy_on(config, category_key, dir_key, slug, legacy_versions, label, add_cmd):
     entry = next((e for e in config.get(category_key, []) if e["slug"] == slug), None)
     if not entry:
         print(f"No managed {label} with slug '{slug}' found. Add it first with '{add_cmd}'.")
         return
     name = entry.get("name", slug)
-    entry["legacy_version"] = legacy_version
+    entry["legacy_versions"] = legacy_versions
     save_config(config)
-    print(f"Legacy fallback set for '{name}': will use {legacy_version} if {config['mc_version']} is unavailable.")
+    print(f"Legacy fallback set for '{name}': will try {', '.join(legacy_versions)} (in that order) "
+          f"if {config['mc_version']} is unavailable.")
+    if config.get("global_legacy_versions"):
+        print(f"Note: the global legacy list ({', '.join(config['global_legacy_versions'])}) is tried first — "
+              f"it takes priority over this per-entry list.")
     print("Running upgrade to apply...")
     cmd_upgrade(config)
 
@@ -1526,33 +1648,63 @@ def _legacy_off(config, category_key, dir_key, slug, label):
         entry["file"] = None
     entry["pending"]       = True
     entry["legacy_active"] = False
-    entry.pop("legacy_version", None)
+    entry.pop("legacy_active_version", None)
+    entry.pop("legacy_versions", None)
     save_config(config)
     print(f"Legacy mode cleared for '{name}'. Marked as pending — run 'upgrade' to retry current version.")
 
 
-def cmd_legacy_on_rp(config, slug, legacy_version):
-    _legacy_on(config, "resourcepacks", "resourcepacks_dir", slug, legacy_version, "resource pack", "add_rp")
+def cmd_legacy_on(config, slug, legacy_versions):
+    _legacy_on(config, "mods", "mods_dir", slug, legacy_versions, "mod", "add")
+
+
+def cmd_legacy_off(config, slug):
+    _legacy_off(config, "mods", "mods_dir", slug, "mod")
+
+
+def cmd_legacy_on_rp(config, slug, legacy_versions):
+    _legacy_on(config, "resourcepacks", "resourcepacks_dir", slug, legacy_versions, "resource pack", "add_rp")
 
 
 def cmd_legacy_off_rp(config, slug):
     _legacy_off(config, "resourcepacks", "resourcepacks_dir", slug, "resource pack")
 
 
-def cmd_legacy_on_sp(config, slug, legacy_version):
-    _legacy_on(config, "shaderpacks", "shaderpacks_dir", slug, legacy_version, "shader pack", "add_sp")
+def cmd_legacy_on_sp(config, slug, legacy_versions):
+    _legacy_on(config, "shaderpacks", "shaderpacks_dir", slug, legacy_versions, "shader pack", "add_sp")
 
 
 def cmd_legacy_off_sp(config, slug):
     _legacy_off(config, "shaderpacks", "shaderpacks_dir", slug, "shader pack")
 
 
-def cmd_legacy_on_dp(config, slug, legacy_version):
-    _legacy_on(config, "datapacks", "datapacks_dir", slug, legacy_version, "datapack", "add_dp")
+def cmd_legacy_on_dp(config, slug, legacy_versions):
+    _legacy_on(config, "datapacks", "datapacks_dir", slug, legacy_versions, "datapack", "add_dp")
 
 
 def cmd_legacy_off_dp(config, slug):
     _legacy_off(config, "datapacks", "datapacks_dir", slug, "datapack")
+
+
+def cmd_legacy_on_global(config, legacy_versions):
+    config["global_legacy_versions"] = legacy_versions
+    save_config(config)
+    print(f"Global legacy fallback set: {', '.join(legacy_versions)} (in that order) — "
+          f"tried before any per-entry legacy list, for every mod/pack that's unavailable "
+          f"for {config['mc_version']}.")
+    print("Running upgrade to apply...")
+    cmd_upgrade(config)
+
+
+def cmd_legacy_off_global(config):
+    if not config.get("global_legacy_versions"):
+        print("No global legacy fallback is set.")
+        return
+    config["global_legacy_versions"] = []
+    save_config(config)
+    print("Global legacy fallback cleared.")
+    print("Running upgrade to apply...")
+    cmd_upgrade(config)
 
 
 # ---------------------------------------------------------------------------
@@ -1618,6 +1770,7 @@ def cmd_upgrade_masterchoose(config):
     for mod in mods:
         name     = mod.get("name", mod["slug"])
         mods_dir = entry_dir(config, mod, "mods_dir")
+        _status(f"Checking {name} on Modrinth...")
         versions, error = get_all_versions(mod["slug"], mc_version, loader)
         if error or not versions:
             print(f"  ✗  {name}: {error or 'no versions found'}")
@@ -1648,7 +1801,7 @@ def cmd_upgrade_masterchoose(config):
             delete_file(mods_dir, old_filename)
 
         dest = Path(mods_dir) / new_filename
-        print(f"  Downloading {name}  ({new_filename}) ...", end="", flush=True)
+        _progress(f"  Downloading {name}  ({new_filename}) ...")
         try:
             download_file(primary["url"], dest)
             print("  OK")
@@ -1656,8 +1809,9 @@ def cmd_upgrade_masterchoose(config):
             mod["pending"]           = False
             mod["chosen_version_id"] = picked_id
             mod.pop("skipped_version_id", None)
-            mod.pop("legacy_active", None)
-            mod.pop("legacy_version", None)
+            mod.pop("legacy_active",         None)
+            mod.pop("legacy_active_version", None)
+            mod.pop("legacy_versions",       None)
             if not mod.get("choose"):
                 mod["choose"] = True
                 print(f"  {cyan('→ choose enabled automatically')}")
@@ -1755,7 +1909,7 @@ def _upgrade_mod_with_choose(config, mod, versions, mods_dir, force_prompt=False
         delete_file(mods_dir, old_filename)
 
     dest = Path(mods_dir) / new_filename
-    print(f"  Downloading {name}  ({new_filename}) ...", end="", flush=True)
+    _progress(f"  Downloading {name}  ({new_filename}) ...")
     try:
         download_file(primary["url"], dest)
         print("  OK")
@@ -1763,8 +1917,9 @@ def _upgrade_mod_with_choose(config, mod, versions, mods_dir, force_prompt=False
         mod["pending"]           = False
         mod["chosen_version_id"] = chosen["id"]
         mod.pop("skipped_version_id", None)
-        mod.pop("legacy_active", None)
-        mod.pop("legacy_version", None)
+        mod.pop("legacy_active",         None)
+        mod.pop("legacy_active_version", None)
+        mod.pop("legacy_versions",       None)
         return "redownloaded" if is_missing_refetch else "updated"
     except Exception as e:
         print("  FAILED")
@@ -2277,6 +2432,12 @@ def cmd_clear(config, target):
 # List command
 # ---------------------------------------------------------------------------
 
+def _legacy_label(entry):
+    if not entry.get("legacy_versions"):
+        return ""
+    return f"  [legacy fallback: {', '.join(entry['legacy_versions'])}]"
+
+
 def _status_of(entry, is_pack):
     tags = []
     if entry.get("frozen"):
@@ -2288,7 +2449,8 @@ def _status_of(entry, is_pack):
     if is_pack and entry.get("outdated"):
         tags.append("OUTDATED")
     if entry.get("legacy_active"):
-        tags.append("LEGACY")
+        ver = entry.get("legacy_active_version")
+        tags.append(f"LEGACY:{ver}" if ver else "LEGACY")
     if entry.get("pending"):
         tags.append("PENDING")
     if not tags:
@@ -2301,6 +2463,8 @@ def cmd_list(config):
         print(bold(yellow("*** THIS PROFILE IS SHELVED — 'upgrade' is blocked, other commands require confirmation. Run 'unshelf' to resume. ***")))
         print()
     print(f"Minecraft {config['mc_version']}  |  loader: {config['loader']}  |  shader loader: {config.get('shader_loader', 'iris')}")
+    if config.get("global_legacy_versions"):
+        print(f"Global legacy fallback (tried first, for everything): {', '.join(config['global_legacy_versions'])}")
     print()
 
     # Mods
@@ -2311,7 +2475,7 @@ def cmd_list(config):
             status   = _status_of(mod, is_pack=False)
             fileinfo = mod.get("file") or "(no file)"
             name     = mod.get("name", mod["slug"])
-            legacy   = f"  [legacy fallback: {mod['legacy_version']}]" if mod.get("legacy_version") else ""
+            legacy   = _legacy_label(mod)
             print(f"  [{status:8s}]  {name} ({mod['slug']})  —  {fileinfo}{legacy}")
     else:
         print("  (none)")
@@ -2330,7 +2494,7 @@ def cmd_list(config):
             status   = _status_of(pack, is_pack=True)
             fileinfo = pack.get("file") or "(no file)"
             name     = pack.get("name", pack["slug"])
-            legacy   = f"  [legacy fallback: {pack['legacy_version']}]" if pack.get("legacy_version") else ""
+            legacy   = _legacy_label(pack)
             print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}{legacy}")
     else:
         print("  (none)")
@@ -2349,7 +2513,7 @@ def cmd_list(config):
             status   = _status_of(pack, is_pack=True)
             fileinfo = pack.get("file") or "(no file)"
             name     = pack.get("name", pack["slug"])
-            legacy   = f"  [legacy fallback: {pack['legacy_version']}]" if pack.get("legacy_version") else ""
+            legacy   = _legacy_label(pack)
             print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}{legacy}")
     else:
         print("  (none)")
@@ -2368,7 +2532,7 @@ def cmd_list(config):
             status   = _status_of(pack, is_pack=True)
             fileinfo = pack.get("file") or "(no file)"
             name     = pack.get("name", pack["slug"])
-            legacy   = f"  [legacy fallback: {pack['legacy_version']}]" if pack.get("legacy_version") else ""
+            legacy   = _legacy_label(pack)
             print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}{legacy}")
     else:
         print("  (none)")
@@ -2441,7 +2605,8 @@ Commands:
   update-manual <name|filename> <new_filename>
                                   Swap in a newer file you've already placed in the mods
                                   folder by hand — deletes the old file, keeps the name.
-  legacy_on <slug> <version>      Set a legacy fallback version for a mod
+  legacy_on <slug> <v1> [v2 ...]  Set legacy fallback version(s) for a mod, first = highest
+                                  priority. Overridden by the global list if one is set.
   legacy_off <slug>               Clear legacy mode, delete legacy file, mark pending
   link <slug> <filename>          Attach a manually downloaded file to a managed mod
 
@@ -2452,7 +2617,7 @@ Commands:
   remove_manual_rp <name|filename>  Unregister a manual resource pack (file NOT deleted)
   update_manual_rp <name|filename> <new_filename>
                                   Swap in a newer file placed in the resourcepacks folder
-  legacy_on_rp <slug> <version>   Set a legacy fallback version for a resource pack
+  legacy_on_rp <slug> <v1> [v2 ...]  Set legacy fallback version(s) for a resource pack
   legacy_off_rp <slug>            Clear legacy mode, delete legacy file, mark pending
   link_rp <slug> <filename>       Attach a manually downloaded file to a managed RP
 
@@ -2464,7 +2629,7 @@ Commands:
   update_manual_sp <name|filename> <new_filename>
                                   Swap in a newer file placed in the shaderpacks folder
                                   (the .txt config sidecar, if any, is renamed along with it)
-  legacy_on_sp <slug> <version>   Set a legacy fallback version for a shader pack
+  legacy_on_sp <slug> <v1> [v2 ...]  Set legacy fallback version(s) for a shader pack
   legacy_off_sp <slug>            Clear legacy mode, delete legacy file, mark pending
   link_sp <slug> <filename>       Attach a manually downloaded file to a managed SP
 
@@ -2477,9 +2642,17 @@ Commands:
   remove_manual_dp <name|filename>  Unregister a manual datapack (file is NOT deleted)
   update_manual_dp <name|filename> <new_filename>
                                   Swap in a newer file placed in the datapack depot folder
-  legacy_on_dp <slug> <version>   Set a legacy fallback version for a datapack
+  legacy_on_dp <slug> <v1> [v2 ...]  Set legacy fallback version(s) for a datapack
   legacy_off_dp <slug>            Clear legacy mode, delete legacy file, mark pending
   link_dp <slug> <filename>       Attach a manually downloaded file to a managed datapack
+
+  --- Global legacy fallback (all categories) ---
+  legacy_on_global <v1> [v2 ...]  Set the profile-wide fallback list — tried before any
+                                  per-entry legacy list, for every mod/pack that's
+                                  unavailable for the current MC version. Handy for e.g.
+                                  probing known release-candidate tags right after a new
+                                  MC version drops, without touching every entry by hand.
+  legacy_off_global               Clear the global fallback list
 
   --- Freeze / unload / clear ---
   freeze <slug|all>               Pin: keep the current file, skip updating it
@@ -2611,6 +2784,7 @@ _ALL_COMMANDS = {
     "legacy_on_sp", "legacy_off_sp",
     "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "update_manual_dp", "link_dp",
     "legacy_on_dp", "legacy_off_dp",
+    "legacy_on_global", "legacy_off_global",
     "freeze", "unfreeze", "unload", "load", "clear",
     "shelf", "unshelf",
     "help",
@@ -2662,6 +2836,7 @@ def main():
     config = load_config()
     migrate_depot_layout(config)
     _migrate_manual_entries(config)
+    _migrate_legacy_fields(config)
 
     _UPGRADE_CMDS = {"upgrade", "upgrade_chooseall", "upgrade_masterchoose", "set-version"}
     _SHELF_EXEMPT_CMDS = {"list", "help", "shelf", "unshelf"}
@@ -2714,8 +2889,8 @@ def main():
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} update-manual <name|filename> <new_filename>"); sys.exit(1)
         cmd_update_manual(config, rest[0], rest[1])
     elif cmd == "legacy_on":
-        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on <slug> <version>"); sys.exit(1)
-        cmd_legacy_on(config, rest[0], rest[1])
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on <slug> <version1> [version2 ...]"); sys.exit(1)
+        cmd_legacy_on(config, rest[0], rest[1:])
     elif cmd == "legacy_off":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_off <slug>"); sys.exit(1)
         cmd_legacy_off(config, rest[0])
@@ -2751,8 +2926,8 @@ def main():
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} link_rp <slug> <filename>"); sys.exit(1)
         cmd_link_rp(config, rest[0], rest[1])
     elif cmd == "legacy_on_rp":
-        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_rp <slug> <version>"); sys.exit(1)
-        cmd_legacy_on_rp(config, rest[0], rest[1])
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_rp <slug> <version1> [version2 ...]"); sys.exit(1)
+        cmd_legacy_on_rp(config, rest[0], rest[1:])
     elif cmd == "legacy_off_rp":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_off_rp <slug>"); sys.exit(1)
         cmd_legacy_off_rp(config, rest[0])
@@ -2777,8 +2952,8 @@ def main():
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} link_sp <slug> <filename>"); sys.exit(1)
         cmd_link_sp(config, rest[0], rest[1])
     elif cmd == "legacy_on_sp":
-        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_sp <slug> <version>"); sys.exit(1)
-        cmd_legacy_on_sp(config, rest[0], rest[1])
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_sp <slug> <version1> [version2 ...]"); sys.exit(1)
+        cmd_legacy_on_sp(config, rest[0], rest[1:])
     elif cmd == "legacy_off_sp":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_off_sp <slug>"); sys.exit(1)
         cmd_legacy_off_sp(config, rest[0])
@@ -2803,11 +2978,16 @@ def main():
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} link_dp <slug> <filename>"); sys.exit(1)
         cmd_link_dp(config, rest[0], rest[1])
     elif cmd == "legacy_on_dp":
-        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_dp <slug> <version>"); sys.exit(1)
-        cmd_legacy_on_dp(config, rest[0], rest[1])
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_dp <slug> <version1> [version2 ...]"); sys.exit(1)
+        cmd_legacy_on_dp(config, rest[0], rest[1:])
     elif cmd == "legacy_off_dp":
         if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_off_dp <slug>"); sys.exit(1)
         cmd_legacy_off_dp(config, rest[0])
+    elif cmd == "legacy_on_global":
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_on_global <version1> [version2 ...]"); sys.exit(1)
+        cmd_legacy_on_global(config, rest)
+    elif cmd == "legacy_off_global":
+        cmd_legacy_off_global(config)
 
     # Freeze / clear
     elif cmd == "freeze":

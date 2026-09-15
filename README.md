@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.7 (2026-09-15)
+**Script:** `Mcmods.py` — **Version:** R_1.8 (2026-09-15)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
@@ -119,7 +119,7 @@ For each file you gave a slug to, it then asks three follow-ups. **All of them d
 |---|---|
 | Freeze it? | Keeps this exact file forever, skips updates ([Freezing](#freezing-a-mod-or-pack)) |
 | Pick versions by hand (choose)? | Prompts you to pick a version on every upgrade ([Manual Version Selection](#manual-version-selection-advanced)) |
-| Legacy fallback MC version | Type a version like `1.21.1` to use if the current one isn't available ([Legacy Fallback](#legacy-fallback-for-mods)) |
+| Legacy fallback MC version | Type one or more versions, space-separated, e.g. `1.21.1` or `26.3-rc-1 1.21.1`, to try (in that order) if the current one isn't available ([Legacy Fallback](#legacy-fallback-for-mods)) |
 
 There's no freeze/choose/legacy prompt for manual entries — a manual entry is just a filename with no Modrinth project behind it, so there's no version to pin, pick or fall back to.
 
@@ -442,20 +442,41 @@ After clearing, run `upgrade` to re-download everything.
 
 ## Legacy Fallback for Mods
 
-If a mod hasn't been updated for your current Minecraft version, you can tell the script to fall back to an older version automatically:
+If a mod hasn't been updated for your current Minecraft version, you can tell the script to fall back to one or more other versions automatically:
 
 ```
 python Mcmods.py <profile> legacy_on modslug 1.20.1
 python Mcmods.py <profile> legacy_off modslug
 ```
 
-The mod will show as **LEGACY** in the upgrade summary. Once the mod gets updated for your current version, the script switches automatically.
+You can give more than one version, space-separated — they're tried in order, first to last, and the first one that actually has a release wins:
+
+```
+python Mcmods.py <profile> legacy_on modslug 26.3-rc-2 26.3-rc-1 1.20.1
+```
+
+This is also useful right when a new Minecraft version drops: some mod authors publish a release-candidate-tagged build (e.g. `26.3-rc-1`) on Modrinth that works fine on the actual release, before the "real" `26.3`-tagged version shows up. Listing those RC tags ahead of a genuinely older version means the script tries the freshest, most-likely-to-be-correct option first.
+
+The mod will show as **LEGACY:\<version>** in the upgrade summary and `list` — the version shown is whichever candidate actually ended up active, not necessarily the first one in your list. Once the mod gets updated for your current version, the script switches automatically, and clears the configured legacy list for that entry (so if it goes unavailable again later, you'd run `legacy_on` again — this is intentional, so a legacy pin doesn't linger forever after it's stopped being needed).
 
 Running `legacy_off` will **delete the legacy JAR** if it was already downloaded and active, then mark the mod as PENDING so it retries the current version on the next `upgrade`. If the legacy version was never actually downloaded (e.g. you set it but never ran `upgrade`), no file is deleted.
 
+### Global Legacy Fallback (Applies to Everything)
+
+Instead of configuring `legacy_on` for every mod/pack by hand, you can set a profile-wide fallback list that applies to *every* mod, resource pack, shader pack, and datapack that's unavailable for your current version:
+
+```
+python Mcmods.py <profile> legacy_on_global 26.3-rc-2 26.3-rc-1
+python Mcmods.py <profile> legacy_off_global
+```
+
+**The global list always takes priority over any per-entry list** — its versions are tried first, in the order given, before falling through to whatever that specific entry has configured. So if the global list is `26.3-rc-2, 26.3-rc-1` and a mod's own list is `1.20.1`, the effective try-order for that mod is `26.3-rc-2, 26.3-rc-1, 1.20.1` — the global candidates aren't a replacement for the entry's own list, they're tried first, on top of it.
+
+This is the intended way to handle the release-candidate scenario above across a whole profile: set it once right after a new MC version drops, and every currently-unavailable mod/pack automatically probes those RC tags without you touching each one individually. `list` shows the active global list at the top, above the per-category listings.
+
 ### Legacy Fallback for Resource Packs, Shader Packs, and Datapacks
 
-The same fallback works for the other three categories, with per-category commands:
+The same fallback works for the other three categories, with per-category commands (each also accepting multiple space-separated versions, same as mods):
 
 ```
 python Mcmods.py <profile> legacy_on_rp packslug 1.20.1     # Resource packs
@@ -468,7 +489,13 @@ python Mcmods.py <profile> legacy_on_dp packslug 1.20.1     # Datapacks
 python Mcmods.py <profile> legacy_off_dp packslug
 ```
 
-Behaves the same as the mod version — shows as **LEGACY** in `list` and the upgrade summary, switches back automatically once a current-version release appears, and `legacy_off_*` deletes the legacy file (if downloaded) and marks the entry pending so the next `upgrade` retries the current version. This is a separate mechanism from the existing **OUTDATED** status: without a legacy fallback set, a pack that's unavailable for your current version is simply kept as-is (OUTDATED); with one set, the script actively fetches the specific older release instead.
+Behaves the same as the mod version — shows as **LEGACY:\<version>** in `list` and the upgrade summary, switches back automatically once a current-version release appears, and `legacy_off_*` deletes the legacy file (if downloaded) and marks the entry pending so the next `upgrade` retries the current version. This is a separate mechanism from the existing **OUTDATED** status: without any legacy fallback set (per-entry or global) for a pack, an unavailable current version is simply kept as-is (OUTDATED); with one set, the script actively fetches a specific other release instead.
+
+**A caveat carried over from how this has always worked**: if none of the configured candidates (global + per-entry combined) have a release either, the existing file is deleted and the entry marked PENDING — it does not fall back to "just keep what's there." This only matters once a legacy fallback is actually configured; without one, an unavailable pack simply stays OUTDATED with its current file untouched.
+
+### Modrinth Request Throttling
+
+Since legacy fallback can mean several extra Modrinth lookups per entry (one per candidate version tried), API calls are throttled client-side: a flat 2-second minimum gap between requests, and a rolling cap of 30 requests per 60-second window. This applies to all mods/resourcepacks/shaderpacks/datapacks lookups, not just legacy ones — a large profile's `upgrade` may take noticeably longer than before, especially right after a big Minecraft version bump when a lot of entries need extra candidate lookups at once. File downloads themselves aren't throttled (they go straight to Modrinth's CDN, a different host from the metadata API).
 
 ---
 
