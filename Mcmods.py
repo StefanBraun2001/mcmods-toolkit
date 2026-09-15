@@ -3,7 +3,7 @@
 """
 Mcmods.py - Minecraft mod/resourcepack/shaderpack manager (Modrinth + manual)
 
-Version: R_1.6 (2026-08-16)
+Version: R_1.7 (2026-09-15)
 
 Single script for every game profile (Main, Side, a test install, ...). The
 profile is now the first CLI argument instead of being baked into the
@@ -83,6 +83,8 @@ Usage:
   python Mcmods.py <profile> add_manual_rp <filename> [name]
   python Mcmods.py <profile> remove_manual_rp <name|filename>
   python Mcmods.py <profile> update_manual_rp <name|filename> <new_filename>
+  python Mcmods.py <profile> legacy_on_rp <slug> <version>
+  python Mcmods.py <profile> legacy_off_rp <slug>
   python Mcmods.py <profile> link_rp <slug> <filename>
 
   python Mcmods.py <profile> add_sp <slug> [slug2 ...]  # shader packs
@@ -90,6 +92,8 @@ Usage:
   python Mcmods.py <profile> add_manual_sp <filename> [name]
   python Mcmods.py <profile> remove_manual_sp <name|filename>
   python Mcmods.py <profile> update_manual_sp <name|filename> <new_filename>
+  python Mcmods.py <profile> legacy_on_sp <slug> <version>
+  python Mcmods.py <profile> legacy_off_sp <slug>
   python Mcmods.py <profile> link_sp <slug> <filename>
 
   python Mcmods.py <profile> add_dp <slug> [slug2 ...]  # datapacks (kept in depot/Datapacks)
@@ -97,6 +101,8 @@ Usage:
   python Mcmods.py <profile> add_manual_dp <filename> [name]
   python Mcmods.py <profile> remove_manual_dp <name|filename>
   python Mcmods.py <profile> update_manual_dp <name|filename> <new_filename>
+  python Mcmods.py <profile> legacy_on_dp <slug> <version>
+  python Mcmods.py <profile> legacy_off_dp <slug>
   python Mcmods.py <profile> link_dp <slug> <filename>
 
   python Mcmods.py <profile> freeze <slug|all>      # pin (keep file, skip updates)
@@ -137,8 +143,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.6"
-SCRIPT_VERSION_DATE = "2026-08-16"
+SCRIPT_VERSION      = "R_1.7"
+SCRIPT_VERSION_DATE = "2026-09-15"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE = None  # set in main() once the profile is known
@@ -503,14 +509,19 @@ def _manual_update(config, manual_key, dir_key, identifier, new_filename, label,
 
 def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=True, only_slug=None):
     """
-    Upgrade one category of packs (resourcepacks or shaderpacks).
-    keep_outdated=True: if no new version found, keep file and mark OUTDATED.
+    Upgrade one category of packs (resourcepacks, shaderpacks, or datapacks).
+    keep_outdated=True: if no new version found and no legacy fallback is set,
+    keep file and mark OUTDATED.
     only_slug: if given, only that single pack is processed.
-    Returns (updated, ok, outdated, errors, frozen, unloaded, redownloaded) name lists.
-    'redownloaded' entries are NOT a new version — the recorded version was still
-    current, but its file had gone missing (moved/deleted by hand), so it was
-    silently re-fetched. Kept separate from 'updated' so callers don't mistake a
-    fail-safe re-fetch for an actual new release.
+    Returns (updated, ok, outdated, errors, frozen, unloaded, redownloaded, legacy)
+    name lists. 'redownloaded' entries are NOT a new version — the recorded
+    version was still current, but its file had gone missing (moved/deleted by
+    hand), so it was silently re-fetched. Kept separate from 'updated' so
+    callers don't mistake a fail-safe re-fetch for an actual new release.
+    'legacy' is a list of (name, legacy_version) tuples, mirroring mods'
+    legacy fallback: if the pack isn't available for the current MC version
+    but has a legacy_version set, that older version is fetched instead and
+    the entry is flagged legacy_active until a current release reappears.
     """
     mc_version = config["mc_version"]
     dirty      = False
@@ -522,16 +533,18 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     frozen       = []
     unloaded     = []
     redownloaded = []
+    legacy       = []   # (name, legacy_version)
 
     packs = config.get(category_key, [])
     if only_slug is not None:
         packs = [p for p in packs if p["slug"] == only_slug]
 
     for pack in packs:
-        slug = pack["slug"]
-        name = pack.get("name", slug)
-        is_shader = (category_key == "shaderpacks")
-        packs_dir = entry_dir(config, pack, dir_key)
+        slug       = pack["slug"]
+        name       = pack.get("name", slug)
+        legacy_ver = pack.get("legacy_version")
+        is_shader  = (category_key == "shaderpacks")
+        packs_dir  = entry_dir(config, pack, dir_key)
 
         if pack.get("unloaded"):
             unloaded.append(name)
@@ -543,7 +556,56 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
         version_info, error = get_latest_version(slug, mc_version, loader)
 
         if error == "not_available" or (error and "not_available" in error):
-            if keep_outdated:
+            if legacy_ver:
+                legacy_info, legacy_error = get_latest_version(slug, legacy_ver, loader)
+
+                if legacy_error:
+                    # Neither version works.
+                    if pack.get("file"):
+                        delete_file(packs_dir, pack["file"])
+                        pack["file"] = None
+                        dirty = True
+                    pack["pending"]       = True
+                    pack["legacy_active"] = False
+                    dirty = True
+                    outdated.append(name)
+                else:
+                    files   = legacy_info.get("files", [])
+                    primary = next((f for f in files if f.get("primary")), files[0] if files else None)
+
+                    if not primary:
+                        errors.append((name, "no downloadable file in legacy API response"))
+                        continue
+
+                    new_filename = primary["filename"]
+
+                    file_present = pack.get("file") and (Path(packs_dir) / pack["file"]).exists()
+                    if file_present and pack.get("file") == new_filename and pack.get("legacy_active"):
+                        legacy.append((name, legacy_ver))
+                        continue
+
+                    old_filename = pack.get("file")
+                    if old_filename and old_filename != new_filename:
+                        delete_file(packs_dir, old_filename)
+
+                    dest = Path(packs_dir) / new_filename
+                    print(f"  Downloading {name}  ({new_filename}, legacy {legacy_ver}) ...", end="", flush=True)
+                    try:
+                        download_file(primary["url"], dest)
+                        print("  OK")
+
+                        if is_shader and old_filename and old_filename != new_filename:
+                            rename_shader_config(packs_dir, old_filename, new_filename)
+
+                        pack["file"]          = new_filename
+                        pack["pending"]       = False
+                        pack["legacy_active"] = True
+                        dirty = True
+                        legacy.append((name, legacy_ver))
+                    except Exception as e:
+                        print("  FAILED")
+                        errors.append((name, str(e)))
+            elif keep_outdated:
                 pack["outdated"] = True
                 dirty = True
                 outdated.append(name)
@@ -570,13 +632,13 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
             new_filename = primary["filename"]
 
             file_present = pack.get("file") and (Path(packs_dir) / pack["file"]).exists()
-            if file_present and pack.get("file") == new_filename and not pack.get("pending") and not pack.get("outdated"):
+            if file_present and pack.get("file") == new_filename and not pack.get("pending") and not pack.get("outdated") and not pack.get("legacy_active"):
                 ok.append(name)
                 continue
 
             same_version_missing = (
                 pack.get("file") == new_filename and not file_present
-                and not pack.get("pending") and not pack.get("outdated")
+                and not pack.get("pending") and not pack.get("outdated") and not pack.get("legacy_active")
             )
 
             old_filename = pack.get("file")
@@ -592,10 +654,14 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
 
                 if is_shader and old_filename and old_filename != new_filename:
                     rename_shader_config(packs_dir, old_filename, new_filename)
+                if pack.get("legacy_active"):
+                    print(f"    Legacy mode cleared — now on current version.")
 
                 pack["file"]     = new_filename
                 pack["pending"]  = False
                 pack["outdated"] = False
+                pack.pop("legacy_active",  None)
+                pack.pop("legacy_version", None)
                 dirty = True
                 if same_version_missing:
                     redownloaded.append(name)
@@ -608,7 +674,7 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     if dirty:
         save_config(config)
 
-    return updated, ok, outdated, errors, frozen, unloaded, redownloaded
+    return updated, ok, outdated, errors, frozen, unloaded, redownloaded, legacy
 
 
 # ---------------------------------------------------------------------------
@@ -1016,34 +1082,34 @@ def cmd_upgrade(config, target=None):
     if only_key in (None, "resourcepacks"):
         if only_key is None and config.get("resourcepacks"):
             print("\n-- Resource packs --")
-        rp_updated, rp_ok, rp_outdated, rp_errors, rp_frozen, rp_unloaded, rp_redownloaded = upgrade_pack_category(
+        rp_updated, rp_ok, rp_outdated, rp_errors, rp_frozen, rp_unloaded, rp_redownloaded, rp_legacy = upgrade_pack_category(
             config, "resourcepacks", "resourcepacks_dir", "minecraft", keep_outdated=True,
             only_slug=(target if only_key == "resourcepacks" else None)
         )
     else:
-        rp_updated = rp_ok = rp_outdated = rp_errors = rp_frozen = rp_unloaded = rp_redownloaded = []
+        rp_updated = rp_ok = rp_outdated = rp_errors = rp_frozen = rp_unloaded = rp_redownloaded = rp_legacy = []
 
     # ---- Shader packs ----
     if only_key in (None, "shaderpacks"):
         if only_key is None and config.get("shaderpacks"):
             print("\n-- Shader packs --")
-        sp_updated, sp_ok, sp_outdated, sp_errors, sp_frozen, sp_unloaded, sp_redownloaded = upgrade_pack_category(
+        sp_updated, sp_ok, sp_outdated, sp_errors, sp_frozen, sp_unloaded, sp_redownloaded, sp_legacy = upgrade_pack_category(
             config, "shaderpacks", "shaderpacks_dir", shader_loader, keep_outdated=True,
             only_slug=(target if only_key == "shaderpacks" else None)
         )
     else:
-        sp_updated = sp_ok = sp_outdated = sp_errors = sp_frozen = sp_unloaded = sp_redownloaded = []
+        sp_updated = sp_ok = sp_outdated = sp_errors = sp_frozen = sp_unloaded = sp_redownloaded = sp_legacy = []
 
     # ---- Datapacks (always kept in depot/Datapacks — no live game folder) ----
     if only_key in (None, "datapacks"):
         if only_key is None and config.get("datapacks"):
             print("\n-- Datapacks --")
-        dp_updated, dp_ok, dp_outdated, dp_errors, dp_frozen, dp_unloaded, dp_redownloaded = upgrade_pack_category(
+        dp_updated, dp_ok, dp_outdated, dp_errors, dp_frozen, dp_unloaded, dp_redownloaded, dp_legacy = upgrade_pack_category(
             config, "datapacks", "datapacks_dir", "datapack", keep_outdated=True,
             only_slug=(target if only_key == "datapacks" else None)
         )
     else:
-        dp_updated = dp_ok = dp_outdated = dp_errors = dp_frozen = dp_unloaded = dp_redownloaded = []
+        dp_updated = dp_ok = dp_outdated = dp_errors = dp_frozen = dp_unloaded = dp_redownloaded = dp_legacy = []
 
     # ---- Summary ----
     print()
@@ -1077,8 +1143,8 @@ def cmd_upgrade(config, target=None):
         if not (mods_updated or mods_redownloaded or mods_ok or mods_choose or mods_frozen or mods_unloaded or mods_pending or mods_legacy or mods_errors):
             print("  (none)")
 
-    _print_summary("Resource packs", rp_updated, rp_ok, rp_outdated, rp_errors, rp_frozen, rp_unloaded, mc_version, pending_label="OUTDATED — kept as-is", redownloaded=rp_redownloaded)
-    _print_summary("Shader packs",   sp_updated, sp_ok, sp_outdated, sp_errors, sp_frozen, sp_unloaded, mc_version, pending_label="OUTDATED — kept as-is", redownloaded=sp_redownloaded)
+    _print_summary("Resource packs", rp_updated, rp_ok, rp_outdated, rp_errors, rp_frozen, rp_unloaded, mc_version, pending_label="OUTDATED — kept as-is", redownloaded=rp_redownloaded, legacy=rp_legacy)
+    _print_summary("Shader packs",   sp_updated, sp_ok, sp_outdated, sp_errors, sp_frozen, sp_unloaded, mc_version, pending_label="OUTDATED — kept as-is", redownloaded=sp_redownloaded, legacy=sp_legacy)
 
     # Datapacks get their own summary block — file changes here don't affect
     # a running world until you manually copy the depot file over, so updates
@@ -1089,7 +1155,7 @@ def cmd_upgrade(config, target=None):
     # the 🔔 UPDATED bucket and out of the "go copy this into your world"
     # reminder below (you may well have already moved it there on purpose).
     if only_key in (None, "datapacks"):
-        if dp_updated or dp_ok or dp_outdated or dp_errors or dp_frozen or dp_redownloaded:
+        if dp_updated or dp_ok or dp_outdated or dp_errors or dp_frozen or dp_redownloaded or dp_legacy:
             print(f"\nDatapacks (depot copy — copy into your world's datapacks folder manually):")
             if dp_updated:
                 print(f"  {bold(yellow(f'🔔 UPDATED ({len(dp_updated)}) — copy these into your world(s):'))}")
@@ -1105,6 +1171,8 @@ def cmd_upgrade(config, target=None):
                 print(f"  ❄  {name}: FROZEN — skipped, kept current file (run 'unfreeze' to resume)")
             for name in dp_outdated:
                 print(f"  ⚠  {name}: OUTDATED — not available for {mc_version}, kept as-is")
+            for name, lver in dp_legacy:
+                print(f"  ⚠  {name}: LEGACY — running on {lver} (not available for {mc_version})")
             for name, msg in dp_errors:
                 print(f"  ✗  {name}: {msg}")
 
@@ -1177,9 +1245,10 @@ def cmd_upgrade_chooseall(config):
     print("\nDone.")
 
 
-def _print_summary(label, updated, ok, pending_or_outdated, errors, frozen, unloaded, mc_version, pending_label, redownloaded=None):
+def _print_summary(label, updated, ok, pending_or_outdated, errors, frozen, unloaded, mc_version, pending_label, redownloaded=None, legacy=None):
     redownloaded = redownloaded or []
-    if not (updated or ok or pending_or_outdated or errors or frozen or unloaded or redownloaded):
+    legacy       = legacy or []
+    if not (updated or ok or pending_or_outdated or errors or frozen or unloaded or redownloaded or legacy):
         return
     print(f"\n{label}:")
     if updated:
@@ -1194,6 +1263,8 @@ def _print_summary(label, updated, ok, pending_or_outdated, errors, frozen, unlo
         print(f"  📦  {name}: UNLOADED — file kept in depot, not active (run 'load' to restore)")
     for name in pending_or_outdated:
         print(f"  ⚠  {name}: {pending_label} for {mc_version}")
+    for name, lver in legacy:
+        print(f"  ⚠  {name}: LEGACY — running on {lver} (not available for {mc_version})")
     for name, msg in errors:
         print(f"  ✗  {name}: {msg}")
 
@@ -1422,6 +1493,66 @@ def cmd_legacy_off(config, slug):
     mod.pop("legacy_version", None)
     save_config(config)
     print(f"Legacy mode cleared for '{name}'. Marked as pending — run 'upgrade' to retry current version.")
+
+
+# ---------------------------------------------------------------------------
+# Legacy fallback for resource packs / shader packs / datapacks — same idea as
+# mods' legacy_on/legacy_off above, generalized since all three pack
+# categories share upgrade_pack_category().
+# ---------------------------------------------------------------------------
+
+def _legacy_on(config, category_key, dir_key, slug, legacy_version, label, add_cmd):
+    entry = next((e for e in config.get(category_key, []) if e["slug"] == slug), None)
+    if not entry:
+        print(f"No managed {label} with slug '{slug}' found. Add it first with '{add_cmd}'.")
+        return
+    name = entry.get("name", slug)
+    entry["legacy_version"] = legacy_version
+    save_config(config)
+    print(f"Legacy fallback set for '{name}': will use {legacy_version} if {config['mc_version']} is unavailable.")
+    print("Running upgrade to apply...")
+    cmd_upgrade(config)
+
+
+def _legacy_off(config, category_key, dir_key, slug, label):
+    entry = next((e for e in config.get(category_key, []) if e["slug"] == slug), None)
+    if not entry:
+        print(f"No managed {label} with slug '{slug}' found.")
+        return
+    name = entry.get("name", slug)
+    if entry.get("file") and entry.get("legacy_active"):
+        if delete_file(entry_dir(config, entry, dir_key), entry["file"]):
+            print(f"Deleted legacy file: {entry['file']}")
+        entry["file"] = None
+    entry["pending"]       = True
+    entry["legacy_active"] = False
+    entry.pop("legacy_version", None)
+    save_config(config)
+    print(f"Legacy mode cleared for '{name}'. Marked as pending — run 'upgrade' to retry current version.")
+
+
+def cmd_legacy_on_rp(config, slug, legacy_version):
+    _legacy_on(config, "resourcepacks", "resourcepacks_dir", slug, legacy_version, "resource pack", "add_rp")
+
+
+def cmd_legacy_off_rp(config, slug):
+    _legacy_off(config, "resourcepacks", "resourcepacks_dir", slug, "resource pack")
+
+
+def cmd_legacy_on_sp(config, slug, legacy_version):
+    _legacy_on(config, "shaderpacks", "shaderpacks_dir", slug, legacy_version, "shader pack", "add_sp")
+
+
+def cmd_legacy_off_sp(config, slug):
+    _legacy_off(config, "shaderpacks", "shaderpacks_dir", slug, "shader pack")
+
+
+def cmd_legacy_on_dp(config, slug, legacy_version):
+    _legacy_on(config, "datapacks", "datapacks_dir", slug, legacy_version, "datapack", "add_dp")
+
+
+def cmd_legacy_off_dp(config, slug):
+    _legacy_off(config, "datapacks", "datapacks_dir", slug, "datapack")
 
 
 # ---------------------------------------------------------------------------
@@ -2156,7 +2287,7 @@ def _status_of(entry, is_pack):
         tags.append("CHOOSE")
     if is_pack and entry.get("outdated"):
         tags.append("OUTDATED")
-    if not is_pack and entry.get("legacy_active"):
+    if entry.get("legacy_active"):
         tags.append("LEGACY")
     if entry.get("pending"):
         tags.append("PENDING")
@@ -2199,7 +2330,8 @@ def cmd_list(config):
             status   = _status_of(pack, is_pack=True)
             fileinfo = pack.get("file") or "(no file)"
             name     = pack.get("name", pack["slug"])
-            print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}")
+            legacy   = f"  [legacy fallback: {pack['legacy_version']}]" if pack.get("legacy_version") else ""
+            print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}{legacy}")
     else:
         print("  (none)")
 
@@ -2217,7 +2349,8 @@ def cmd_list(config):
             status   = _status_of(pack, is_pack=True)
             fileinfo = pack.get("file") or "(no file)"
             name     = pack.get("name", pack["slug"])
-            print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}")
+            legacy   = f"  [legacy fallback: {pack['legacy_version']}]" if pack.get("legacy_version") else ""
+            print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}{legacy}")
     else:
         print("  (none)")
 
@@ -2235,7 +2368,8 @@ def cmd_list(config):
             status   = _status_of(pack, is_pack=True)
             fileinfo = pack.get("file") or "(no file)"
             name     = pack.get("name", pack["slug"])
-            print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}")
+            legacy   = f"  [legacy fallback: {pack['legacy_version']}]" if pack.get("legacy_version") else ""
+            print(f"  [{status:8s}]  {name} ({pack['slug']})  —  {fileinfo}{legacy}")
     else:
         print("  (none)")
 
@@ -2318,6 +2452,8 @@ Commands:
   remove_manual_rp <name|filename>  Unregister a manual resource pack (file NOT deleted)
   update_manual_rp <name|filename> <new_filename>
                                   Swap in a newer file placed in the resourcepacks folder
+  legacy_on_rp <slug> <version>   Set a legacy fallback version for a resource pack
+  legacy_off_rp <slug>            Clear legacy mode, delete legacy file, mark pending
   link_rp <slug> <filename>       Attach a manually downloaded file to a managed RP
 
   --- Shader packs ---
@@ -2328,6 +2464,8 @@ Commands:
   update_manual_sp <name|filename> <new_filename>
                                   Swap in a newer file placed in the shaderpacks folder
                                   (the .txt config sidecar, if any, is renamed along with it)
+  legacy_on_sp <slug> <version>   Set a legacy fallback version for a shader pack
+  legacy_off_sp <slug>            Clear legacy mode, delete legacy file, mark pending
   link_sp <slug> <filename>       Attach a manually downloaded file to a managed SP
 
   --- Datapacks ---
@@ -2339,6 +2477,8 @@ Commands:
   remove_manual_dp <name|filename>  Unregister a manual datapack (file is NOT deleted)
   update_manual_dp <name|filename> <new_filename>
                                   Swap in a newer file placed in the datapack depot folder
+  legacy_on_dp <slug> <version>   Set a legacy fallback version for a datapack
+  legacy_off_dp <slug>            Clear legacy mode, delete legacy file, mark pending
   link_dp <slug> <filename>       Attach a manually downloaded file to a managed datapack
 
   --- Freeze / unload / clear ---
@@ -2466,8 +2606,11 @@ _ALL_COMMANDS = {
     "add", "remove", "add-manual", "remove-manual", "update-manual", "legacy_on", "legacy_off", "choose", "unchoose",
     "unchoose_all", "link",
     "add_rp", "remove_rp", "add_manual_rp", "remove_manual_rp", "update_manual_rp", "link_rp",
+    "legacy_on_rp", "legacy_off_rp",
     "add_sp", "remove_sp", "add_manual_sp", "remove_manual_sp", "update_manual_sp", "link_sp",
+    "legacy_on_sp", "legacy_off_sp",
     "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "update_manual_dp", "link_dp",
+    "legacy_on_dp", "legacy_off_dp",
     "freeze", "unfreeze", "unload", "load", "clear",
     "shelf", "unshelf",
     "help",
@@ -2607,6 +2750,12 @@ def main():
     elif cmd == "link_rp":
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} link_rp <slug> <filename>"); sys.exit(1)
         cmd_link_rp(config, rest[0], rest[1])
+    elif cmd == "legacy_on_rp":
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_rp <slug> <version>"); sys.exit(1)
+        cmd_legacy_on_rp(config, rest[0], rest[1])
+    elif cmd == "legacy_off_rp":
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_off_rp <slug>"); sys.exit(1)
+        cmd_legacy_off_rp(config, rest[0])
 
     # Shader packs
     elif cmd == "add_sp":
@@ -2627,6 +2776,12 @@ def main():
     elif cmd == "link_sp":
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} link_sp <slug> <filename>"); sys.exit(1)
         cmd_link_sp(config, rest[0], rest[1])
+    elif cmd == "legacy_on_sp":
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_sp <slug> <version>"); sys.exit(1)
+        cmd_legacy_on_sp(config, rest[0], rest[1])
+    elif cmd == "legacy_off_sp":
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_off_sp <slug>"); sys.exit(1)
+        cmd_legacy_off_sp(config, rest[0])
 
     # Datapacks
     elif cmd == "add_dp":
@@ -2647,6 +2802,12 @@ def main():
     elif cmd == "link_dp":
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} link_dp <slug> <filename>"); sys.exit(1)
         cmd_link_dp(config, rest[0], rest[1])
+    elif cmd == "legacy_on_dp":
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} legacy_on_dp <slug> <version>"); sys.exit(1)
+        cmd_legacy_on_dp(config, rest[0], rest[1])
+    elif cmd == "legacy_off_dp":
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} legacy_off_dp <slug>"); sys.exit(1)
+        cmd_legacy_off_dp(config, rest[0])
 
     # Freeze / clear
     elif cmd == "freeze":

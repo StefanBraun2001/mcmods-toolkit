@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.6 (2026-08-16)
+**Script:** `Mcmods.py` — **Version:** R_1.7 (2026-09-15)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
@@ -452,6 +452,23 @@ python Mcmods.py <profile> legacy_off modslug
 The mod will show as **LEGACY** in the upgrade summary. Once the mod gets updated for your current version, the script switches automatically.
 
 Running `legacy_off` will **delete the legacy JAR** if it was already downloaded and active, then mark the mod as PENDING so it retries the current version on the next `upgrade`. If the legacy version was never actually downloaded (e.g. you set it but never ran `upgrade`), no file is deleted.
+
+### Legacy Fallback for Resource Packs, Shader Packs, and Datapacks
+
+The same fallback works for the other three categories, with per-category commands:
+
+```
+python Mcmods.py <profile> legacy_on_rp packslug 1.20.1     # Resource packs
+python Mcmods.py <profile> legacy_off_rp packslug
+
+python Mcmods.py <profile> legacy_on_sp packslug 1.20.1     # Shader packs
+python Mcmods.py <profile> legacy_off_sp packslug
+
+python Mcmods.py <profile> legacy_on_dp packslug 1.20.1     # Datapacks
+python Mcmods.py <profile> legacy_off_dp packslug
+```
+
+Behaves the same as the mod version — shows as **LEGACY** in `list` and the upgrade summary, switches back automatically once a current-version release appears, and `legacy_off_*` deletes the legacy file (if downloaded) and marks the entry pending so the next `upgrade` retries the current version. This is a separate mechanism from the existing **OUTDATED** status: without a legacy fallback set, a pack that's unavailable for your current version is simply kept as-is (OUTDATED); with one set, the script actively fetches the specific older release instead.
 
 ---
 
