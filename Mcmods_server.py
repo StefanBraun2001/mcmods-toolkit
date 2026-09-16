@@ -90,8 +90,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.8"
-SCRIPT_VERSION_DATE = "2026-09-15"
+SCRIPT_VERSION      = "R_1.9"
+SCRIPT_VERSION_DATE = "2026-09-17"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE    = None  # set in main() once the profile is known
@@ -1323,16 +1323,21 @@ def _legacy_off(config, entries_key, slug, label):
         print(f"No managed {label} with slug '{slug}' found.")
         return
     name = entry.get("name", slug)
-    if entry.get("file") and entry.get("legacy_active"):
+    had_legacy_file = bool(entry.get("file") and entry.get("legacy_active"))
+    if had_legacy_file:
         if delete_file(config["mods_dir"], entry["file"]):
             print(f"Deleted legacy file: {entry['file']}")
-        entry["file"] = None
-    entry["pending"]       = True
+        entry["file"]    = None
+        entry["pending"] = True
     entry["legacy_active"] = False
     entry.pop("legacy_active_version", None)
     entry.pop("legacy_versions", None)
     save_config(config)
-    print(f"Legacy mode cleared for '{name}'. Marked as pending — run 'upgrade' to retry current version.")
+    if had_legacy_file:
+        print(f"Legacy mode cleared for '{name}'. Running upgrade to retry current version...")
+        cmd_upgrade(config)
+    else:
+        print(f"Legacy mode cleared for '{name}'. Already on a current release — nothing to re-download.")
 
 
 def cmd_legacy_on(config, slug, legacy_versions):
@@ -1714,7 +1719,7 @@ Commands:
                                   the name.
   legacy_on <slug> <v1> [v2 ...]  Set legacy fallback version(s) for a mod, first = highest
                                   priority. Overridden by the global list if one is set.
-  legacy_off <slug>               Clear legacy mode, delete legacy file, mark pending
+  legacy_off <slug>               Clear legacy mode, delete legacy file, re-upgrade to current
   link <slug> <filename>          Attach a manually downloaded file to a managed mod
   choose <slug>                   Flag a mod for manual version selection on upgrade
   unchoose <slug>                 Remove the flag, resume auto-updating
@@ -1728,7 +1733,7 @@ Commands:
   update_manual_dp <name|filename> <new_filename>
                                   Swap in a newer file placed in the download folder
   legacy_on_dp <slug> <v1> [v2 ...]  Set legacy fallback version(s) for a datapack
-  legacy_off_dp <slug>            Clear legacy mode, delete legacy file, mark pending
+  legacy_off_dp <slug>            Clear legacy mode, delete legacy file, re-upgrade to current
   link_dp <slug> <filename>       Attach a manually downloaded file to a managed datapack
   choose_dp <slug>                Flag a datapack for manual version selection on upgrade
   unchoose_dp <slug>              Remove the flag, resume auto-updating
