@@ -158,8 +158,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.9"
-SCRIPT_VERSION_DATE = "2026-09-17"
+SCRIPT_VERSION      = "R_1.9.1"
+SCRIPT_VERSION_DATE = "2026-09-26"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE = None  # set in main() once the profile is known
@@ -740,6 +740,8 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     configured (per-entry and/or the profile-wide global list — see
     _legacy_candidates), the first one that has a release is fetched instead
     and the entry is flagged legacy_active until a current release reappears.
+    'patched' is a list of (name, "kept"|"missing"|"replaced", filename) for
+    entries carrying a self-supplied band-aid file (see cmd_patch_on).
     """
     mc_version = config["mc_version"]
     dirty      = False
@@ -752,6 +754,7 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     unloaded     = []
     redownloaded = []
     legacy       = []   # (name, chosen_legacy_version)
+    patched      = []   # (name, state, filename)
 
     packs = config.get(category_key, [])
     if only_slug is not None:
@@ -775,7 +778,9 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
         version_info, error = get_latest_version(slug, mc_version, loader)
 
         if error == "not_available" or (error and "not_available" in error):
-            if candidates:
+            if pack.get("patched"):
+                patched.append((name, _patch_state(pack, packs_dir), pack.get("file")))
+            elif candidates:
                 active, chosen, legacy_errors = _try_legacy_fallback(
                     pack, packs_dir, candidates, loader, name, slug, is_shader=is_shader
                 )
@@ -812,13 +817,16 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
             new_filename = primary["filename"]
 
             file_present = pack.get("file") and (Path(packs_dir) / pack["file"]).exists()
-            if file_present and pack.get("file") == new_filename and not pack.get("pending") and not pack.get("outdated") and not pack.get("legacy_active"):
+            was_patched  = bool(pack.get("patched"))
+            if (file_present and pack.get("file") == new_filename and not pack.get("pending")
+                    and not pack.get("outdated") and not pack.get("legacy_active") and not was_patched):
                 ok.append(name)
                 continue
 
             same_version_missing = (
                 pack.get("file") == new_filename and not file_present
-                and not pack.get("pending") and not pack.get("outdated") and not pack.get("legacy_active")
+                and not pack.get("pending") and not pack.get("outdated")
+                and not pack.get("legacy_active") and not was_patched
             )
 
             old_filename = pack.get("file")
@@ -836,6 +844,9 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
                     rename_shader_config(packs_dir, old_filename, new_filename)
                 if pack.get("legacy_active"):
                     print(f"    Legacy mode cleared — now on current version.")
+                if was_patched:
+                    print(f"    Patch cleared — official release installed.")
+                    patched.append((name, "replaced", old_filename))
 
                 pack["file"]     = new_filename
                 pack["pending"]  = False
@@ -843,6 +854,7 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
                 pack.pop("legacy_active",         None)
                 pack.pop("legacy_active_version", None)
                 pack.pop("legacy_versions",       None)
+                pack.pop("patched",               None)
                 dirty = True
                 if same_version_missing:
                     redownloaded.append(name)
@@ -855,7 +867,7 @@ def upgrade_pack_category(config, category_key, dir_key, loader, keep_outdated=T
     if dirty:
         save_config(config)
 
-    return updated, ok, outdated, errors, frozen, unloaded, redownloaded, legacy
+    return updated, ok, outdated, errors, frozen, unloaded, redownloaded, legacy, patched
 
 
 # ---------------------------------------------------------------------------
@@ -1099,6 +1111,7 @@ def cmd_upgrade(config, target=None):
     mods_choose   = []   # (name, detail_string)
     mods_skipped  = []   # name — choose-flagged but no new version to prompt
     mods_redownloaded = []   # name — same version, file was missing, silently refetched
+    mods_patched  = []   # (name, "kept"|"missing"|"replaced", filename)
     dirty         = False
 
     mods_to_process = config.get("mods", [])
@@ -1123,8 +1136,11 @@ def cmd_upgrade(config, target=None):
         is_not_available = error == "not_available" or (error and "not_available" in error)
 
         if mod.get("choose") and versions and not is_not_available:
+            patched_file = mod.get("file") if mod.get("patched") else None
             result = _upgrade_mod_with_choose(config, mod, versions, mods_dir, force_prompt=False)
             dirty = True
+            if patched_file and not mod.get("patched"):
+                mods_patched.append((name, "replaced", patched_file))
             if result == "updated":
                 mods_updated.append(name)
                 vtype = versions[0].get("version_type", "?")
@@ -1165,13 +1181,15 @@ def cmd_upgrade(config, target=None):
             new_filename = primary["filename"]
 
             file_present = mod.get("file") and (Path(mod_dir) / mod["file"]).exists()
-            if file_present and mod.get("file") == new_filename and not mod.get("pending") and not mod.get("legacy_active"):
+            was_patched  = bool(mod.get("patched"))
+            if (file_present and mod.get("file") == new_filename and not mod.get("pending")
+                    and not mod.get("legacy_active") and not was_patched):
                 mods_ok.append(name)
                 continue
 
             same_version_missing = (
                 mod.get("file") == new_filename and not file_present
-                and not mod.get("pending") and not mod.get("legacy_active")
+                and not mod.get("pending") and not mod.get("legacy_active") and not was_patched
             )
 
             old_filename = mod.get("file")
@@ -1185,11 +1203,15 @@ def cmd_upgrade(config, target=None):
                 print("  OK")
                 if mod.get("legacy_active"):
                     print(f"    Legacy mode cleared — now on current version.")
+                if was_patched:
+                    print(f"    Patch cleared — official release installed.")
+                    mods_patched.append((name, "replaced", old_filename))
                 mod["file"]          = new_filename
                 mod["pending"]       = False
                 mod.pop("legacy_active",         None)
                 mod.pop("legacy_active_version", None)
                 mod.pop("legacy_versions",       None)
+                mod.pop("patched",               None)
                 dirty = True
                 if same_version_missing:
                     mods_redownloaded.append(name)
@@ -1203,8 +1225,10 @@ def cmd_upgrade(config, target=None):
             mods_errors.append((name, error))
 
         else:
-            # Not available for current version — try legacy fallback
-            if candidates:
+            # Not available for current version — a patched file wins over legacy
+            if mod.get("patched"):
+                mods_patched.append((name, _patch_state(mod, mod_dir), mod.get("file")))
+            elif candidates:
                 active, chosen, legacy_errors = _try_legacy_fallback(
                     mod, mod_dir, candidates, loader, name, slug
                 )
@@ -1231,34 +1255,34 @@ def cmd_upgrade(config, target=None):
     if only_key in (None, "resourcepacks"):
         if only_key is None and config.get("resourcepacks"):
             print("\n-- Resource packs --")
-        rp_updated, rp_ok, rp_outdated, rp_errors, rp_frozen, rp_unloaded, rp_redownloaded, rp_legacy = upgrade_pack_category(
+        rp_updated, rp_ok, rp_outdated, rp_errors, rp_frozen, rp_unloaded, rp_redownloaded, rp_legacy, rp_patched = upgrade_pack_category(
             config, "resourcepacks", "resourcepacks_dir", "minecraft", keep_outdated=True,
             only_slug=(target if only_key == "resourcepacks" else None)
         )
     else:
-        rp_updated = rp_ok = rp_outdated = rp_errors = rp_frozen = rp_unloaded = rp_redownloaded = rp_legacy = []
+        rp_updated = rp_ok = rp_outdated = rp_errors = rp_frozen = rp_unloaded = rp_redownloaded = rp_legacy = rp_patched = []
 
     # ---- Shader packs ----
     if only_key in (None, "shaderpacks"):
         if only_key is None and config.get("shaderpacks"):
             print("\n-- Shader packs --")
-        sp_updated, sp_ok, sp_outdated, sp_errors, sp_frozen, sp_unloaded, sp_redownloaded, sp_legacy = upgrade_pack_category(
+        sp_updated, sp_ok, sp_outdated, sp_errors, sp_frozen, sp_unloaded, sp_redownloaded, sp_legacy, sp_patched = upgrade_pack_category(
             config, "shaderpacks", "shaderpacks_dir", shader_loader, keep_outdated=True,
             only_slug=(target if only_key == "shaderpacks" else None)
         )
     else:
-        sp_updated = sp_ok = sp_outdated = sp_errors = sp_frozen = sp_unloaded = sp_redownloaded = sp_legacy = []
+        sp_updated = sp_ok = sp_outdated = sp_errors = sp_frozen = sp_unloaded = sp_redownloaded = sp_legacy = sp_patched = []
 
     # ---- Datapacks (always kept in depot/Datapacks — no live game folder) ----
     if only_key in (None, "datapacks"):
         if only_key is None and config.get("datapacks"):
             print("\n-- Datapacks --")
-        dp_updated, dp_ok, dp_outdated, dp_errors, dp_frozen, dp_unloaded, dp_redownloaded, dp_legacy = upgrade_pack_category(
+        dp_updated, dp_ok, dp_outdated, dp_errors, dp_frozen, dp_unloaded, dp_redownloaded, dp_legacy, dp_patched = upgrade_pack_category(
             config, "datapacks", "datapacks_dir", "datapack", keep_outdated=True,
             only_slug=(target if only_key == "datapacks" else None)
         )
     else:
-        dp_updated = dp_ok = dp_outdated = dp_errors = dp_frozen = dp_unloaded = dp_redownloaded = dp_legacy = []
+        dp_updated = dp_ok = dp_outdated = dp_errors = dp_frozen = dp_unloaded = dp_redownloaded = dp_legacy = dp_patched = []
 
     # ---- Summary ----
     print()
@@ -1289,7 +1313,7 @@ def cmd_upgrade(config, target=None):
         for name, msg in mods_errors:
             if not any(name == c[0] and "error" in c[1] for c in mods_choose):
                 print(f"  ✗  {name}: {msg}")
-        if not (mods_updated or mods_redownloaded or mods_ok or mods_choose or mods_frozen or mods_unloaded or mods_pending or mods_legacy or mods_errors):
+        if not (mods_updated or mods_redownloaded or mods_ok or mods_choose or mods_frozen or mods_unloaded or mods_pending or mods_legacy or mods_patched or mods_errors):
             print("  (none)")
 
     _print_summary("Resource packs", rp_updated, rp_ok, rp_outdated, rp_errors, rp_frozen, rp_unloaded, mc_version, pending_label="OUTDATED — kept as-is", redownloaded=rp_redownloaded, legacy=rp_legacy)
@@ -1324,6 +1348,19 @@ def cmd_upgrade(config, target=None):
                 print(f"  ⚠  {name}: LEGACY — running on {lver} (not available for {mc_version})")
             for name, msg in dp_errors:
                 print(f"  ✗  {name}: {msg}")
+
+    all_patched = mods_patched + rp_patched + sp_patched + dp_patched
+    if all_patched:
+        print(f"\n🩹 Patched (self-supplied band-aid files):")
+        for name, state, fname in all_patched:
+            if state == "kept":
+                print(f"  🩹  {name}: no {mc_version} release on Modrinth yet — kept your file {fname}")
+            elif state == "missing":
+                print(f"  {yellow('⚠')}  {name}: no {mc_version} release on Modrinth yet, and your patched file "
+                      f"{fname or '(none)'} is missing — put it back or run 'patch_off' / 'link_patch'")
+            else:
+                print(f"  {green('✓')}  {name}: official {mc_version} release installed — replaced your patched file "
+                      f"{fname}, patch flag cleared")
 
     # Overall frozen / unloaded reminders
     all_frozen = mods_frozen + rp_frozen + sp_frozen + dp_frozen
@@ -1781,8 +1818,10 @@ def cmd_upgrade_masterchoose(config):
             print(f"  ✗  {name}: {error or 'no versions found'}")
             continue
 
-        current_id = mod.get("chosen_version_id")
-        chosen = _prompt_version_choice(name, versions, current_version_id=current_id, current_filename=mod.get("file"))
+        # A patched file is the user's own build, so no Modrinth version counts as installed.
+        current_id   = None if mod.get("patched") else mod.get("chosen_version_id")
+        current_file = None if mod.get("patched") else mod.get("file")
+        chosen = _prompt_version_choice(name, versions, current_version_id=current_id, current_filename=current_file)
 
         if chosen is None:
             print(f"  {yellow('→ skipped')}")
@@ -1817,6 +1856,8 @@ def cmd_upgrade_masterchoose(config):
             mod.pop("legacy_active",         None)
             mod.pop("legacy_active_version", None)
             mod.pop("legacy_versions",       None)
+            if mod.pop("patched", None):
+                print(f"  {cyan('→ patch cleared, official release installed')}")
             if not mod.get("choose"):
                 mod["choose"] = True
                 print(f"  {cyan('→ choose enabled automatically')}")
@@ -1881,10 +1922,13 @@ def _upgrade_mod_with_choose(config, mod, versions, mods_dir, force_prompt=False
     newest    = versions[0]
     newest_id = newest["id"]
     is_missing_refetch = False
+    patched   = bool(mod.get("patched"))
+    cur_id    = None if patched else mod.get("chosen_version_id")
+    cur_file  = None if patched else mod.get("file")
 
     if not force_prompt:
         file_present = mod.get("file") and (Path(mods_dir) / mod["file"]).exists()
-        if newest_id == mod.get("chosen_version_id"):
+        if newest_id == cur_id:
             if file_present:
                 return "ok"
             # The chosen version is still current, but the file itself is gone
@@ -1895,9 +1939,9 @@ def _upgrade_mod_with_choose(config, mod, versions, mods_dir, force_prompt=False
         elif newest_id == mod.get("skipped_version_id"):
             return "skipped"
         else:
-            chosen = _prompt_version_choice(name, versions, current_version_id=mod.get("chosen_version_id"), current_filename=mod.get("file"))
+            chosen = _prompt_version_choice(name, versions, current_version_id=cur_id, current_filename=cur_file)
     else:
-        chosen = _prompt_version_choice(name, versions, current_version_id=mod.get("chosen_version_id"), current_filename=mod.get("file"))
+        chosen = _prompt_version_choice(name, versions, current_version_id=cur_id, current_filename=cur_file)
 
     if chosen is None:
         mod["skipped_version_id"] = newest_id
@@ -1925,6 +1969,8 @@ def _upgrade_mod_with_choose(config, mod, versions, mods_dir, force_prompt=False
         mod.pop("legacy_active",         None)
         mod.pop("legacy_active_version", None)
         mod.pop("legacy_versions",       None)
+        if mod.pop("patched", None):
+            print(f"    Patch cleared — official release installed.")
         return "redownloaded" if is_missing_refetch else "updated"
     except Exception as e:
         print("  FAILED")
@@ -2066,7 +2112,7 @@ def cmd_update_manual_dp(config, identifier, new_filename):
 # Link commands (point 4): attach a manually downloaded file to a managed entry
 # ---------------------------------------------------------------------------
 
-def _cmd_link(config, category_key, dir_key, label, slug, filename):
+def _cmd_link(config, category_key, dir_key, label, slug, filename, patch=False):
     entry = next((e for e in config.get(category_key, []) if e["slug"] == slug), None)
     if not entry:
         print(f"No managed {label} with slug '{slug}' found. Add it first.")
@@ -2079,25 +2125,85 @@ def _cmd_link(config, category_key, dir_key, label, slug, filename):
     entry.pop("unloaded", None)
     if "outdated" in entry:
         entry["outdated"] = False
+    if patch:
+        _mark_patched(entry)
     save_config(config)
     print(f"Linked '{filename}' to {label} '{entry.get('name', slug)}'.")
-    print("You can now 'freeze' it to keep this file across upgrades.")
+    if patch:
+        _print_patch_explainer(config)
+    else:
+        print("You can now 'freeze' it to keep this file across upgrades, or 'patch_on' it to keep it")
+        print("only until an official release for this Minecraft version shows up.")
 
 
-def cmd_link(config, slug, filename):
-    _cmd_link(config, "mods", "mods_dir", "mod", slug, filename)
+def cmd_link(config, slug, filename, patch=False):
+    _cmd_link(config, "mods", "mods_dir", "mod", slug, filename, patch)
 
 
-def cmd_link_rp(config, slug, filename):
-    _cmd_link(config, "resourcepacks", "resourcepacks_dir", "resource pack", slug, filename)
+def cmd_link_rp(config, slug, filename, patch=False):
+    _cmd_link(config, "resourcepacks", "resourcepacks_dir", "resource pack", slug, filename, patch)
 
 
-def cmd_link_sp(config, slug, filename):
-    _cmd_link(config, "shaderpacks", "shaderpacks_dir", "shader pack", slug, filename)
+def cmd_link_sp(config, slug, filename, patch=False):
+    _cmd_link(config, "shaderpacks", "shaderpacks_dir", "shader pack", slug, filename, patch)
 
 
-def cmd_link_dp(config, slug, filename):
-    _cmd_link(config, "datapacks", "datapacks_dir", "datapack", slug, filename)
+def cmd_link_dp(config, slug, filename, patch=False):
+    _cmd_link(config, "datapacks", "datapacks_dir", "datapack", slug, filename, patch)
+
+
+# ---------------------------------------------------------------------------
+# Patch mode: a self-supplied band-aid file (e.g. a jar you rebuilt for the
+# new MC version) that upgrade keeps instead of deleting while Modrinth has
+# nothing for the configured version. The first official release replaces it
+# and clears the flag. Takes precedence over legacy fallback.
+# ---------------------------------------------------------------------------
+
+def _mark_patched(entry):
+    entry["patched"] = True
+    entry.pop("legacy_active",         None)
+    entry.pop("legacy_active_version", None)
+
+
+def _patch_state(entry, d):
+    return "kept" if entry.get("file") and (Path(d) / entry["file"]).exists() else "missing"
+
+
+def _print_patch_explainer(config):
+    print(f"Marked as PATCHED: upgrade keeps this file while Modrinth has nothing for "
+          f"{config['mc_version']}, and replaces it (clearing the flag) once an official release appears.")
+
+
+def cmd_patch_on(config, slug):
+    entry, _ = _find_entry(config, slug)
+    if not entry:
+        print(f"No managed mod/pack with slug '{slug}' found.")
+        return
+    name = entry.get("name", slug)
+    if not entry.get("file"):
+        print(f"'{name}' has no file linked — use 'link_patch' (or link_patch_rp/_sp/_dp) to attach one.")
+        return
+    _mark_patched(entry)
+    entry["pending"] = False
+    if "outdated" in entry:
+        entry["outdated"] = False
+    save_config(config)
+    print(f"'{name}' ({entry['file']}):")
+    _print_patch_explainer(config)
+
+
+def cmd_patch_off(config, slug):
+    entry, _ = _find_entry(config, slug)
+    if not entry:
+        print(f"No managed mod/pack with slug '{slug}' found.")
+        return
+    name = entry.get("name", slug)
+    if not entry.pop("patched", None):
+        print(f"'{name}' was not patched.")
+        return
+    save_config(config)
+    print(f"Patch flag cleared for '{name}'. The file stays for now; the next 'upgrade' treats it normally")
+    print("(if nothing is available for the current version, that means pending/legacy/outdated as usual).")
 
 
 # ---------------------------------------------------------------------------
@@ -2355,6 +2461,7 @@ def _clear_mod(config, mod):
     mod["file"]    = None
     mod["pending"] = True
     mod.pop("unloaded", None)
+    mod.pop("patched",  None)
 
 
 def _clear_pack(config, pack, dir_key, is_shader):
@@ -2376,6 +2483,7 @@ def _clear_pack(config, pack, dir_key, is_shader):
     pack["pending"]  = True
     pack["outdated"] = False
     pack.pop("unloaded", None)
+    pack.pop("patched",  None)
 
 
 def cmd_clear(config, target):
@@ -2456,6 +2564,8 @@ def _status_of(entry, is_pack):
     if entry.get("legacy_active"):
         ver = entry.get("legacy_active_version")
         tags.append(f"LEGACY:{ver}" if ver else "LEGACY")
+    if entry.get("patched"):
+        tags.append("PATCHED")
     if entry.get("pending"):
         tags.append("PENDING")
     if not tags:
@@ -2659,6 +2769,19 @@ Commands:
                                   MC version drops, without touching every entry by hand.
   legacy_off_global               Clear the global fallback list
 
+  --- Patch mode (your own band-aid file, all categories) ---
+  link_patch <slug> <filename>    Like 'link', but also marks it PATCHED: while Modrinth has
+                                  nothing for the current MC version, upgrade keeps this file
+                                  (instead of deleting it / trying legacy). The first official
+                                  release replaces it and clears the flag. Reported in the
+                                  upgrade summary under 🩹.
+  link_patch_rp / link_patch_sp / link_patch_dp <slug> <filename>
+                                  Same for resource / shader / datapacks
+  patch_on <slug>                 Mark the already-linked file as PATCHED (if you used plain
+                                  'link' and forgot the patch variant)
+  patch_off <slug>                Clear the PATCHED flag; file stays, next upgrade handles it
+                                  normally
+
   --- Freeze / unload / clear ---
   freeze <slug|all>               Pin: keep the current file, skip updating it
   unfreeze <slug|all>             Resume normal updating
@@ -2790,6 +2913,7 @@ _ALL_COMMANDS = {
     "add_dp", "remove_dp", "add_manual_dp", "remove_manual_dp", "update_manual_dp", "link_dp",
     "legacy_on_dp", "legacy_off_dp",
     "legacy_on_global", "legacy_off_global",
+    "link_patch", "link_patch_rp", "link_patch_sp", "link_patch_dp", "patch_on", "patch_off",
     "freeze", "unfreeze", "unload", "load", "clear",
     "shelf", "unshelf",
     "help",
@@ -2910,6 +3034,17 @@ def main():
     elif cmd == "link":
         if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} link <slug> <filename>"); sys.exit(1)
         cmd_link(config, rest[0], rest[1])
+    elif cmd in ("link_patch", "link_patch_rp", "link_patch_sp", "link_patch_dp"):
+        if len(rest) < 2: print(f"Usage: python Mcmods.py {profile} {cmd} <slug> <filename>"); sys.exit(1)
+        link_fn = {"link_patch": cmd_link, "link_patch_rp": cmd_link_rp,
+                   "link_patch_sp": cmd_link_sp, "link_patch_dp": cmd_link_dp}[cmd]
+        link_fn(config, rest[0], rest[1], patch=True)
+    elif cmd == "patch_on":
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} patch_on <slug>"); sys.exit(1)
+        cmd_patch_on(config, rest[0])
+    elif cmd == "patch_off":
+        if len(rest) < 1: print(f"Usage: python Mcmods.py {profile} patch_off <slug>"); sys.exit(1)
+        cmd_patch_off(config, rest[0])
 
     # Resource packs
     elif cmd == "add_rp":

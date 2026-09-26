@@ -90,8 +90,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SCRIPT_VERSION      = "R_1.9"
-SCRIPT_VERSION_DATE = "2026-09-17"
+SCRIPT_VERSION      = "R_1.9.1"
+SCRIPT_VERSION_DATE = "2026-09-26"
 SCRIPT_DIR          = Path(__file__).parent
 
 CONFIG_FILE    = None  # set in main() once the profile is known

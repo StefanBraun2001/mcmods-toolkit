@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.9 (2026-09-17)
+**Script:** `Mcmods.py` — **Version:** R_1.9.1 (2026-09-26)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
@@ -419,6 +419,32 @@ python Mcmods.py <profile> link_dp <slug> <filename>
 
 After linking, you can `freeze` the entry if you want to keep that exact file.
 
+### Patched Files (Your Own Band-Aid Until the Author Updates)
+
+When a new Minecraft version drops and a mod's author takes a while to update, you can supply your own working file (e.g. a jar you patched or rebuilt yourself) and mark it **PATCHED**:
+
+```
+python Mcmods.py <profile> link_patch <slug> <filename>
+python Mcmods.py <profile> link_patch_rp <slug> <filename>
+python Mcmods.py <profile> link_patch_sp <slug> <filename>
+python Mcmods.py <profile> link_patch_dp <slug> <filename>
+```
+
+Put the file into the matching folder first (same as `link`). If you already used plain `link` and forgot the patch variant, mark the linked file afterwards — works for any category, like `freeze`:
+
+```
+python Mcmods.py <profile> patch_on <slug>
+python Mcmods.py <profile> patch_off <slug>
+```
+
+What `upgrade` does with a patched entry:
+
+- **Modrinth has a release for your MC version** → it's installed, your patched file is replaced, and the flag is cleared. For choose-flagged mods you get the version picker instead, and the flag is cleared once you pick one.
+- **Nothing for your MC version** → your file is left alone. No deleting, no PENDING, and legacy fallback (per-entry or global) is skipped — your patch wins over a legacy download.
+- Either way, the upgrade summary gets a 🩹 **Patched** block saying which happened. If the patched file has gone missing from the folder, that's flagged there too.
+
+`patch_off` only clears the flag — the file stays, and the next `upgrade` treats the entry like any other one (so if there's still nothing for your version, that means PENDING / legacy / OUTDATED as usual). `clear` also drops the flag, since the file is gone afterwards. The difference to `freeze`: a frozen entry is never checked at all, a patched one is checked on every `upgrade` and lets go on its own.
+
 ---
 
 ## Clearing Files
@@ -459,7 +485,7 @@ This is also useful right when a new Minecraft version drops: some mod authors p
 
 The mod will show as **LEGACY:\<version>** in the upgrade summary and `list` — the version shown is whichever candidate actually ended up active, not necessarily the first one in your list. Once the mod gets updated for your current version, the script switches automatically, and clears the configured legacy list for that entry (so if it goes unavailable again later, you'd run `legacy_on` again — this is intentional, so a legacy pin doesn't linger forever after it's stopped being needed).
 
-Running `legacy_off` will **delete the legacy JAR** if it was already downloaded and active, then mark the mod as PENDING so it retries the current version on the next `upgrade`. If the legacy version was never actually downloaded (e.g. you set it but never ran `upgrade`), no file is deleted.
+Running `legacy_off` will **delete the legacy JAR** if it was still active and immediately run `upgrade` to fetch the current version. If there's no active legacy file — e.g. `upgrade` already switched the mod to a current release on its own, or you never ran `upgrade` after setting it — it just clears the setting, with no file deleted and nothing re-downloaded.
 
 ### Global Legacy Fallback (Applies to Everything)
 
@@ -489,7 +515,7 @@ python Mcmods.py <profile> legacy_on_dp packslug 1.20.1     # Datapacks
 python Mcmods.py <profile> legacy_off_dp packslug
 ```
 
-Behaves the same as the mod version — shows as **LEGACY:\<version>** in `list` and the upgrade summary, switches back automatically once a current-version release appears, and `legacy_off_*` deletes the legacy file (if downloaded) and marks the entry pending so the next `upgrade` retries the current version. This is a separate mechanism from the existing **OUTDATED** status: without any legacy fallback set (per-entry or global) for a pack, an unavailable current version is simply kept as-is (OUTDATED); with one set, the script actively fetches a specific other release instead.
+Behaves the same as the mod version — shows as **LEGACY:\<version>** in `list` and the upgrade summary, switches back automatically once a current-version release appears, and `legacy_off_*` deletes a still-active legacy file and immediately runs `upgrade` to fetch the current version (or just clears the setting if there's no active legacy file). This is a separate mechanism from the existing **OUTDATED** status: without any legacy fallback set (per-entry or global) for a pack, an unavailable current version is simply kept as-is (OUTDATED); with one set, the script actively fetches a specific other release instead.
 
 **A caveat carried over from how this has always worked**: if none of the configured candidates (global + per-entry combined) have a release either, the existing file is deleted and the entry marked PENDING — it does not fall back to "just keep what's there." This only matters once a legacy fallback is actually configured; without one, an unavailable pack simply stays OUTDATED with its current file untouched.
 
@@ -509,6 +535,7 @@ Since legacy fallback can mean several extra Modrinth lookups per entry (one per
 | ⚠ PENDING | Not available for your MC version yet — will retry next upgrade |
 | ⚠ LEGACY | Running on an older MC version as a fallback |
 | ⚠ OUTDATED | Resource/shader/data pack not available for your version — kept as-is |
+| 🩹 PATCHED | Your own band-aid file — kept while nothing is on Modrinth for your version, replaced (and flag cleared) once there is |
 | ✎ CHOOSE | You manually selected a version for this mod |
 | 🔔 UPDATED | Datapack changed in the depot — copy it into your world(s) manually |
 | 🔁 REDOWNLOADED | Same version as before, but the file was missing and got silently re-fetched — not a new release |

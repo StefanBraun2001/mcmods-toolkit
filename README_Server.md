@@ -1,6 +1,6 @@
 # Minecraft Server Mod Manager — README
 
-**Script:** `Mcmods_server.py` — **Version:** R_1.9 (2026-09-17)
+**Script:** `Mcmods_server.py` — **Version:** R_1.9.1 (2026-09-26)
 
 This is the **server** variant of the mod manager: it downloads the mods and datapacks you want to run on a Minecraft server from [Modrinth](https://modrinth.com) into a download folder of your choosing, ready to be copied onto the server (or symlinked into it). Unlike the game-profile manager (`Mcmods.py`, see [README.md](README.md)), it has no concept of resource packs or shader packs, and it doesn't touch your actual server installation directly — it's an intermediate staging folder that you move into place yourself.
 
@@ -283,7 +283,7 @@ This is also useful right when a new Minecraft version drops: some mod authors p
 
 The entry shows as **LEGACY:\<version>** in `list`/the upgrade summary — the version shown is whichever candidate actually ended up active. Once the mod/datapack author releases a version for your current Minecraft version, the script switches back automatically, and clears the configured legacy list for that entry (so if it goes unavailable again later, you'd run `legacy_on` again).
 
-Running `legacy_off`/`legacy_off_dp` **deletes the legacy file** if it was already downloaded and active, then marks the entry PENDING so it retries the current version on the next `upgrade`.
+Running `legacy_off`/`legacy_off_dp` **deletes the legacy file** if it was still active and immediately runs `upgrade` to fetch the current version. If there's no active legacy file (e.g. `upgrade` already switched the entry to a current release on its own), it just clears the setting — nothing deleted, nothing re-downloaded.
 
 **A caveat carried over from how this has always worked**: if none of the configured candidates have a release either, the existing file is deleted and the entry marked PENDING — it does not fall back to "just keep what's there." This only matters once a legacy fallback is actually configured for that entry.
 
