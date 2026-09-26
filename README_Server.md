@@ -1,6 +1,6 @@
 # Minecraft Server Mod Manager — README
 
-**Script:** `Mcmods_server.py` — **Version:** R_1.9.1 (2026-09-26)
+**Script:** `Mcmods_server.py` — **Version:** R_1.9.2 (2026-09-26)
 
 This is the **server** variant of the mod manager: it downloads the mods and datapacks you want to run on a Minecraft server from [Modrinth](https://modrinth.com) into a download folder of your choosing, ready to be copied onto the server (or symlinked into it). Unlike the game-profile manager (`Mcmods.py`, see [README.md](README.md)), it has no concept of resource packs or shader packs, and it doesn't touch your actual server installation directly — it's an intermediate staging folder that you move into place yourself.
 
@@ -116,6 +116,8 @@ Useful details:
 python Mcmods_server.py <profile> upgrade
 ```
 Downloads the latest version of every mod and datapack you have registered for that profile. Already up-to-date items are skipped.
+
+**Missing files are re-fetched.** "Up to date" means the recorded version is still the newest one *and* its file is actually in the download folder. If you deleted or moved a file by hand, `upgrade` downloads the same version again and lists it as 🔁 **Redownloaded** (not a new release). This is intended behavior from R_1.9.2 on and matches the client script. Before R_1.9.2 the server script only compared filenames in its config and silently treated a missing file as up to date.
 
 ### Update just one mod or datapack
 ```
@@ -236,6 +238,30 @@ python Mcmods_server.py <profile> link <slug> <filename>
 python Mcmods_server.py <profile> link_dp <slug> <filename>
 ```
 
+### Patched Files (Your Own Band-Aid Until the Author Updates)
+
+When a new Minecraft version drops and a mod's author takes a while to update, you can supply your own working file (e.g. a jar you patched or rebuilt yourself) and mark it **PATCHED**:
+
+```
+python Mcmods_server.py <profile> link_patch <slug> <filename>
+python Mcmods_server.py <profile> link_patch_dp <slug> <filename>
+```
+
+Put the file into the download folder first (same as `link`). If you already used plain `link` and forgot the patch variant, mark the linked file afterwards — works for mods and datapacks alike, like `freeze`:
+
+```
+python Mcmods_server.py <profile> patch_on <slug>
+python Mcmods_server.py <profile> patch_off <slug>
+```
+
+What `upgrade` does with a patched entry:
+
+- **Modrinth has a release for your MC version** → it's installed, your patched file is replaced, and the flag is cleared. For choose-flagged entries you get the version picker instead, and the flag is cleared once you pick one.
+- **Nothing for your MC version** → your file is left alone. No deleting, no PENDING, and legacy fallback (per-entry or global) is skipped — your patch wins over a legacy download.
+- Either way, the upgrade summary gets a 🩹 **Patched** block saying which happened. If the patched file has gone missing from the folder, that's flagged there too.
+
+`patch_off` only clears the flag — the file stays, and the next `upgrade` treats the entry like any other one. `clear` also drops the flag, since the file is gone afterwards. The difference to `freeze`: a frozen entry is never checked at all, a patched one is checked on every `upgrade` and lets go on its own.
+
 ---
 
 ## Switching Minecraft Version
@@ -353,6 +379,8 @@ Deletes the files locally (nothing is quarantined — there's no quarantine fold
 | ⚠ PENDING | Not available for your MC version yet — will retry next upgrade |
 | ⚠ LEGACY | Running on an older MC version as a fallback |
 | ✎ CHOOSE | You manually selected a version for this entry |
+| 🩹 PATCHED | Your own band-aid file — kept while nothing is on Modrinth for your version, replaced (and flag cleared) once there is |
+| 🔁 REDOWNLOADED | Same version as before, but the file was missing from the download folder and got re-fetched — not a new release |
 | ✗ | Something went wrong — error message shown next to it |
 
 ---

@@ -1,6 +1,6 @@
 # Minecraft Mod Manager — README
 
-**Script:** `Mcmods.py` — **Version:** R_1.9.1 (2026-09-26)
+**Script:** `Mcmods.py` — **Version:** R_1.9.2 (2026-09-26)
 
 This script automatically downloads and updates your Minecraft mods, resource packs, shader packs, and datapacks from [Modrinth](https://modrinth.com). Instead of hunting down updates manually, you just run one command and everything gets updated at once.
 
@@ -141,7 +141,7 @@ If you'd rather do it by hand, the old approach still works: `add <slug>` then `
 ```
 python Mcmods.py <profile> upgrade
 ```
-Downloads the latest version of every mod, resource pack, shader pack, and datapack you have registered. Already up-to-date items are skipped — but only if the file is actually still there. If a tracked file goes missing (e.g. you deleted it, or moved it instead of copying it), `upgrade` notices it's gone even though the config still points at the latest version, and re-downloads it. This is reported as **🔁 Redownloaded**, separate from **Updated** — it's the same version as before, just fetched again, not a new release.
+Downloads the latest version of every mod, resource pack, shader pack, and datapack you have registered. Already up-to-date items are skipped — but only if the file is actually still there. If a tracked file goes missing (e.g. you deleted it, or moved it instead of copying it), `upgrade` notices it's gone even though the config still points at the latest version, and re-downloads it. This is reported as **🔁 Redownloaded**, separate from **Updated** — it's the same version as before, just fetched again, not a new release. This check is standard behavior for both scripts: the server script does the same since R_1.9.2.
 
 ### Update just one mod or pack
 ```
